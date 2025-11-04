@@ -1,0 +1,14 @@
+[project]
+name = "onee"
+version = "0.1.0"
+description = "Utilities for the notebooks and scripts"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[build-system]
+requires = ["setuptools>=61", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

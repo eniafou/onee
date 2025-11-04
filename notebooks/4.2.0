@@ -1,0 +1,23 @@
+Collecting nbformat
+  Using cached nbformat-5.10.4-py3-none-any.whl (78 kB)
+Collecting fastjsonschema>=2.15
+  Downloading fastjsonschema-2.21.2-py3-none-any.whl (24 kB)
+Collecting jsonschema>=2.6
+  Downloading jsonschema-4.25.1-py3-none-any.whl (90 kB)
+     ---------------------------------------- 90.0/90.0 kB 1.7 MB/s eta 0:00:00
+Requirement already satisfied: jupyter-core!=5.0.*,>=4.12 in c:\users\soufiane.aitelaouad\dev.cleverlytics\venvs\.onee\lib\site-packages (from nbformat) (5.9.1)
+Requirement already satisfied: traitlets>=5.1 in c:\users\soufiane.aitelaouad\dev.cleverlytics\venvs\.onee\lib\site-packages (from nbformat) (5.14.3)
+Collecting attrs>=22.2.0
+  Downloading attrs-25.4.0-py3-none-any.whl (67 kB)
+     ---------------------------------------- 67.6/67.6 kB 1.9 MB/s eta 0:00:00
+Collecting jsonschema-specifications>=2023.03.6
+  Downloading jsonschema_specifications-2025.9.1-py3-none-any.whl (18 kB)
+Collecting referencing>=0.28.4
+  Downloading referencing-0.37.0-py3-none-any.whl (26 kB)
+Collecting rpds-py>=0.7.1
+  Downloading rpds_py-0.28.0-cp311-cp311-win_amd64.whl (223 kB)
+     -------------------------------------- 224.0/224.0 kB 3.4 MB/s eta 0:00:00
+Requirement already satisfied: platformdirs>=2.5 in c:\users\soufiane.aitelaouad\dev.cleverlytics\venvs\.onee\lib\site-packages (from jupyter-core!=5.0.*,>=4.12->nbformat) (4.5.0)
+Requirement already satisfied: typing-extensions>=4.4.0 in c:\users\soufiane.aitelaouad\dev.cleverlytics\venvs\.onee\lib\site-packages (from referencing>=0.28.4->jsonschema>=2.6->nbformat) (4.15.0)
+Installing collected packages: fastjsonschema, rpds-py, attrs, referencing, jsonschema-specifications, jsonschema, nbformat
+Successfully installed attrs-25.4.0 fastjsonschema-2.21.2 jsonschema-4.25.1 jsonschema-specifications-2025.9.1 nbformat-5.10.4 referencing-0.37.0 rpds-py-0.28.0

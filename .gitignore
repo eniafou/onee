@@ -1,0 +1,8 @@
+.venv/
+__pycache__/
+data/
+outputs_cd/
+outputs_srm/
+record/
+*.egg-info/
+*.egg
