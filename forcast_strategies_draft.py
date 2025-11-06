@@ -1939,47 +1939,42 @@ def save_summary(all_results, output_file, monthly_book_file=None):
     # ---- global summary (unchanged) ----
     summary_data = []
     for result in all_results:
-        best = result["best_model"]
+        best = result.get("best_model", {})
         row = {
-            "Entity": result["entity"],
-            "Strategy": best["strategy"],
-            "Lags": best["n_lags"],
-            "Features": best["feature_block"],
-            "PC_Weight": (
-                best["pc_weight"] if best.get("pc_weight") is not None else "N/A"
-            ),
+            "Entity": result.get("entity"),
+            "Strategy": best.get("strategy"),
+            "Lags": best.get("n_lags"),
+            "Features": best.get("feature_block"),
+            "PC_Weight": best.get("pc_weight", "N/A"),
             "PCA_Lambda": best.get("pca_lambda", "N/A"),
             "Monthly_Temp": best.get("use_monthly_temp", False),
             "Monthly_Clients": best.get("use_monthly_clients", False),
-            "Client_Pattern_Weight": (
-                best["client_pattern_weight"]
-                if best.get("client_pattern_weight") is not None
-                else "N/A"
-            ),
+            "Client_Pattern_Weight": best.get("client_pattern_weight", "N/A"),
             "Ensemble_Components": (
-                ", ".join(best["ensemble_reference_strategies"])
+                ", ".join(best.get("ensemble_reference_strategies", []))
                 if best.get("ensemble_reference_strategies")
                 else "N/A"
             ),
             "Ensemble_Weights": best.get("ensemble_weights", "N/A"),
             "Training_window": best.get("training_window", "N/A"),
-            "Annual_MAE": best["annual_mae"],
-            "Annual_MAPE": best["annual_mape"],
-            "Annual_R2": best["annual_r2"],
-            "Monthly_MAE": best["monthly_mae"],
-            "Monthly_MAPE": best["monthly_mape"],
-            "Monthly_R2": best["monthly_r2"],
+            "Annual_MAE": best.get("annual_mae"),
+            "Annual_MAPE": best.get("annual_mape"),
+            "Annual_R2": best.get("annual_r2"),
+            "Monthly_MAE": best.get("monthly_mae"),
+            "Monthly_MAPE": best.get("monthly_mape"),
+            "Monthly_R2": best.get("monthly_r2"),
         }
-        if "test_years" in result:
+        test_years = result.get("test_years", {})
+        if test_years:
             row.update(
                 {
                     k: v
-                    for k, v in result["test_years"].items()
+                    for k, v in test_years.items()
                     if k.endswith("annual_ci95")
                 }
             )
             row.update(
-                {k: v for k, v in result["test_years"].items() if k.endswith("annual")}
+                {k: v for k, v in test_years.items() if k.endswith("annual")}
             )
         summary_data.append(row)
 
@@ -1992,7 +1987,7 @@ def save_summary(all_results, output_file, monthly_book_file=None):
             used_sheet_names = set()
 
             for result in all_results:
-                entity = result["entity"]
+                entity = result.get("entity")
                 monthly_details = result.get("monthly_details", {})
                 if not monthly_details:
                     continue

@@ -131,3 +131,153 @@ def build_ensemble_result(
         "bias_fit_target": "annual" if use_annual else "monthly",
         **metrics,
     }
+
+
+def handle_similarity_contract_kproto(df, kproto, cluster_profiles, contrat_id):
+    """
+    Handle a 'similarity' contract using K-Prototypes cluster centroid.
+    Uses centroid mean 2023 profile as predicted monthly pattern.
+    """
+    df_contrat = df[df['contrat'] == contrat_id].copy()
+    if df_contrat.empty:
+        print(f"⚠️ Contract {contrat_id} not found.")
+        return _build_empty_result(df_contrat, contrat_id)
+
+    # Build feature vector for prediction (activite + 2023 monthly values)
+    activite = df_contrat['activite'].iloc[0]
+    df_2023 = df_contrat[df_contrat['annee'] == 2023].sort_values('mois')
+    profile_2023 = df_2023['puissance facturée'].fillna(0).to_numpy()
+    if len(profile_2023) < 12:
+        profile_2023 = np.pad(profile_2023, (0, 12 - len(profile_2023)), constant_values=0)
+
+    X_new = np.concatenate([[activite], profile_2023]).reshape(1, -1)
+    cluster = kproto.predict(X_new, categorical=[0])[0]
+
+    centroid_profile = cluster_profiles.loc[cluster].to_numpy()
+    centroid_profile = centroid_profile / (centroid_profile.sum() or 1)
+
+    # Predicted 2023 = scaled centroid shape * actual total of 2023
+    actual_2023 = df_contrat[df_contrat['annee'] == 2023]['consommation'].fillna(0).to_numpy()
+    if len(actual_2023) < 12:
+        actual_2023 = np.pad(actual_2023, (0, 12 - len(actual_2023)), constant_values=0)
+    annual_actual = actual_2023.sum()
+
+    predicted_2023 = annual_actual * centroid_profile
+
+    # Compute error %
+    with np.errstate(divide="ignore", invalid="ignore"):
+        error_pct = np.where(actual_2023 != 0, (predicted_2023 - actual_2023) / actual_2023 * 100, np.nan)
+
+    annual_pred = predicted_2023.sum()
+    annual_error_pct = (
+        np.nan if annual_actual == 0 else ((annual_pred - annual_actual) / annual_actual) * 100
+    )
+
+    # Build final result
+    best_model = {
+        'pred_monthly_matrix': np.array([predicted_2023]),
+        'actual_monthly_matrix': actual_2023.reshape(1, -1),
+        'valid_years': np.array([2023]),
+        'strategy': f"KPrototypes - Similarity (Cluster {cluster})",
+    }
+
+    test_years = {
+        '2023_actual_monthly': actual_2023,
+        '2023_predicted_monthly': predicted_2023,
+        '2023_error_pct_monthly': error_pct,
+        '2023_actual_annual': annual_actual,
+        '2023_predicted_annual': annual_pred,
+        '2023_error_pct_annual': annual_error_pct,
+        '2023_cluster_id': int(cluster),
+    }
+
+    print(f"🔗 Contract {contrat_id} assigned to cluster {cluster}.")
+    return {
+        "entity": f"Contrat_{contrat_id}",
+        "best_model": best_model,
+        "training_end": None,
+        "monthly_details": {},
+        "test_years": test_years,
+    }
+
+
+def handle_growth_contract_kproto(df, kproto, cluster_profiles, contrat_id):
+    """
+    Handle a 'growth' contract using K-Prototypes cluster centroid.
+    Predicts 2023 using the centroid's log growth rate from 2022->2023.
+    """
+    df_contrat = df[df['contrat'] == contrat_id].copy()
+    if df_contrat.empty:
+        print(f"⚠️ Contract {contrat_id} not found.")
+        return _build_empty_result(df_contrat, contrat_id)
+
+    activite = df_contrat['activite'].iloc[0]
+    df_2023 = df_contrat[df_contrat['annee'] == 2023].sort_values('mois')
+    profile_2023 = df_2023['puissance facturée'].fillna(0).to_numpy()
+    if len(profile_2023) < 12:
+        profile_2023 = np.pad(profile_2023, (0, 12 - len(profile_2023)), constant_values=0)
+
+    X_new = np.concatenate([[activite], profile_2023]).reshape(1, -1)
+    cluster = kproto.predict(X_new, categorical=[0])[0]
+
+    # Centroid monthly curve for 2023
+    centroid_curve = cluster_profiles.loc[cluster].to_numpy()
+    centroid_shape = centroid_curve / (centroid_curve.sum() or 1)
+
+    # Estimate log growth rate within this cluster (based on all contracts)
+    df_cluster = df[df['activite'] == activite].copy()
+    df_cluster['cluster'] = kproto.predict(
+        np.column_stack([df_cluster['activite'], df_cluster['puissance facturée']]),
+        categorical=[0]
+    )
+    cluster_df = df_cluster[df_cluster['cluster'] == cluster]
+    if cluster_df.empty:
+        growth_rate = 0.0
+    else:
+        annual_df = cluster_df.groupby(['contrat', 'annee'])['consommation'].sum().unstack()
+        if {2022, 2023}.issubset(annual_df.columns):
+            annual_df = annual_df.dropna(subset=[2022, 2023])
+            if len(annual_df) > 0:
+                growth_rate = np.log((annual_df[2023] + 1e-9) / (annual_df[2022] + 1e-9)).mean()
+            else:
+                growth_rate = 0.0
+        else:
+            growth_rate = 0.0
+
+    # Apply growth rate to this contract's 2022 consumption
+    actual_2022 = df_contrat[df_contrat['annee'] == 2022]['consommation'].sum()
+    predicted_2023_annual = np.exp(np.log(actual_2022 + 1e-9) + growth_rate)
+    predicted_2023_monthly = predicted_2023_annual * centroid_shape
+
+    # Compute errors if actual 2023 exists
+    actual_2023 = df_contrat[df_contrat['annee'] == 2023]['consommation'].fillna(0).to_numpy()
+    if len(actual_2023) < 12:
+        actual_2023 = np.pad(actual_2023, (0, 12 - len(actual_2023)), constant_values=0)
+    with np.errstate(divide="ignore", invalid="ignore"):
+        error_pct = np.where(actual_2023 != 0, (predicted_2023_monthly - actual_2023) / actual_2023 * 100, np.nan)
+
+    best_model = {
+        'pred_monthly_matrix': np.array([predicted_2023_monthly]),
+        'actual_monthly_matrix': actual_2023.reshape(1, -1),
+        'valid_years': np.array([2022, 2023]),
+        'strategy': f"KPrototypes - Growth (Cluster {cluster})",
+    }
+
+    test_years = {
+        '2023_actual_monthly': actual_2023,
+        '2023_predicted_monthly': predicted_2023_monthly,
+        '2023_error_pct_monthly': error_pct,
+        '2023_actual_annual': actual_2023.sum(),
+        '2023_predicted_annual': predicted_2023_annual,
+        '2023_cluster_id': int(cluster),
+        '2023_growth_rate_log': float(growth_rate),
+    }
+
+    print(f"🚀 Contract {contrat_id} → Cluster {cluster}, Growth Rate: {growth_rate:.4f}")
+    return {
+        "entity": f"Contrat_{contrat_id}",
+        "best_model": best_model,
+        "training_end": None,
+        "monthly_details": {},
+        "test_years": test_years,
+    }

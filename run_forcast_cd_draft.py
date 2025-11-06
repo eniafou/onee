@@ -319,75 +319,9 @@ def handle_similarity_contract(df, all_results_established, contrat_id):
     print(f"🔁 Reused 2023 predictions from contract {best_match_id}")
     return result
 
-def handle_similarity_contract_kproto(df, kproto, cluster_profiles, contrat_id):
-    """
-    Handle a 'similarity' contract using K-Prototypes cluster centroid.
-    Uses centroid mean 2023 profile as predicted monthly pattern.
-    """
-    df_contrat = df[df['contrat'] == contrat_id].copy()
-    if df_contrat.empty:
-        print(f"⚠️ Contract {contrat_id} not found.")
-        return _build_empty_result(df_contrat, contrat_id)
-
-    # Build feature vector for prediction (activite + 2023 monthly values)
-    activite = df_contrat['activite'].iloc[0]
-    df_2023 = df_contrat[df_contrat['annee'] == 2023].sort_values('mois')
-    profile_2023 = df_2023['puissance facturée'].fillna(0).to_numpy()
-    if len(profile_2023) < 12:
-        profile_2023 = np.pad(profile_2023, (0, 12 - len(profile_2023)), constant_values=0)
-
-    X_new = np.concatenate([[activite], profile_2023]).reshape(1, -1)
-    cluster = kproto.predict(X_new, categorical=[0])[0]
-
-    centroid_profile = cluster_profiles.loc[cluster].to_numpy()
-    centroid_profile = centroid_profile / (centroid_profile.sum() or 1)
-
-    # Predicted 2023 = scaled centroid shape * actual total of 2023
-    actual_2023 = df_contrat[df_contrat['annee'] == 2023]['consommation'].fillna(0).to_numpy()
-    if len(actual_2023) < 12:
-        actual_2023 = np.pad(actual_2023, (0, 12 - len(actual_2023)), constant_values=0)
-    annual_actual = actual_2023.sum()
-
-    predicted_2023 = annual_actual * centroid_profile
-
-    # Compute error %
-    with np.errstate(divide="ignore", invalid="ignore"):
-        error_pct = np.where(actual_2023 != 0, (predicted_2023 - actual_2023) / actual_2023 * 100, np.nan)
-
-    annual_pred = predicted_2023.sum()
-    annual_error_pct = (
-        np.nan if annual_actual == 0 else ((annual_pred - annual_actual) / annual_actual) * 100
-    )
-
-    # Build final result
-    best_model = {
-        'pred_monthly_matrix': np.array([predicted_2023]),
-        'actual_monthly_matrix': actual_2023.reshape(1, -1),
-        'valid_years': np.array([2023]),
-        'strategy': f"KPrototypes - Similarity (Cluster {cluster})",
-    }
-
-    test_years = {
-        '2023_actual_monthly': actual_2023,
-        '2023_predicted_monthly': predicted_2023,
-        '2023_error_pct_monthly': error_pct,
-        '2023_actual_annual': annual_actual,
-        '2023_predicted_annual': annual_pred,
-        '2023_error_pct_annual': annual_error_pct,
-        '2023_cluster_id': int(cluster),
-    }
-
-    print(f"🔗 Contract {contrat_id} assigned to cluster {cluster}.")
-    return {
-        "entity": f"Contrat_{contrat_id}",
-        "best_model": best_model,
-        "training_end": None,
-        "monthly_details": {},
-        "test_years": test_years,
-    }
 
 
-def _build_empty_result(df_contrat, contrat_id):
+def _build_empty_result(df_contrat, contrat_id, level_type="contrat"):
     """Return a consistent empty result object for similarity contracts."""
     actual_2023 = np.zeros(12)
     nan_arr = np.full(12, np.nan)
@@ -423,7 +357,7 @@ def _build_empty_result(df_contrat, contrat_id):
     }
 
     return {
-        "entity": f"Contrat_{contrat_id}",
+        "entity": f'{ "Contrat" if level_type == "contrat" else "Activité"}_{contrat_id}',
         "best_model": best_model,
         "training_end": None,
         "monthly_details": {},
@@ -615,87 +549,286 @@ def handle_growth_contract(df, all_results_established, contrat_id):
     print(f"✅ Predicted 2023 annual: {predicted_2023_annual:,.2f} (using growth rate {growth_rate:.4f})")
     return result
 
-def handle_growth_contract_kproto(df, kproto, cluster_profiles, contrat_id):
+def handle_growth_entity(df, all_results_established, entity_id, level_type="contrat"):
     """
-    Handle a 'growth' contract using K-Prototypes cluster centroid.
-    Predicts 2023 using the centroid's log growth rate from 2022->2023.
+    Generic handler for growth entities (either contracts or activities).
+    - For contracts: filters within same activity unless no peers exist.
+    - For activities: compares directly via puissance facturée vectors.
     """
-    df_contrat = df[df['contrat'] == contrat_id].copy()
-    if df_contrat.empty:
-        print(f"⚠️ Contract {contrat_id} not found.")
-        return _build_empty_result(df_contrat, contrat_id)
+    if level_type not in ["contrat", "activite"]:
+        raise ValueError("level_type must be either 'contrat' or 'activite'.")
 
-    activite = df_contrat['activite'].iloc[0]
-    df_2023 = df_contrat[df_contrat['annee'] == 2023].sort_values('mois')
-    profile_2023 = df_2023['puissance facturée'].fillna(0).to_numpy()
-    if len(profile_2023) < 12:
-        profile_2023 = np.pad(profile_2023, (0, 12 - len(profile_2023)), constant_values=0)
+    df_entity = df[df[level_type] == entity_id].copy()
+    if df_entity.empty:
+        print(f"⚠️ {level_type.capitalize()} {entity_id} not found.")
+        return _build_empty_result(df_entity, entity_id, level_type)
 
-    X_new = np.concatenate([[activite], profile_2023]).reshape(1, -1)
-    cluster = kproto.predict(X_new, categorical=[0])[0]
+    label = level_type.capitalize()
+    print(f"\n🚀 Handling growth {label}: {entity_id}")
 
-    # Centroid monthly curve for 2023
-    centroid_curve = cluster_profiles.loc[cluster].to_numpy()
-    centroid_shape = centroid_curve / (centroid_curve.sum() or 1)
+    # === Determine comparison subset ===
+    if level_type == "contrat":
+        activite = df_entity["activite"].iloc[0]
+        df_same_activity = df[df["activite"] == activite].copy()
 
-    # Estimate log growth rate within this cluster (based on all contracts)
-    df_cluster = df[df['activite'] == activite].copy()
-    df_cluster['cluster'] = kproto.predict(
-        np.column_stack([df_cluster['activite'], df_cluster['puissance facturée']]),
-        categorical=[0]
-    )
-    cluster_df = df_cluster[df_cluster['cluster'] == cluster]
-    if cluster_df.empty:
-        growth_rate = 0.0
-    else:
-        annual_df = cluster_df.groupby(['contrat', 'annee'])['consommation'].sum().unstack()
-        if {2022, 2023}.issubset(annual_df.columns):
-            annual_df = annual_df.dropna(subset=[2022, 2023])
-            if len(annual_df) > 0:
-                growth_rate = np.log((annual_df[2023] + 1e-9) / (annual_df[2022] + 1e-9)).mean()
-            else:
-                growth_rate = 0.0
+        contrats_in_activity = df_same_activity["contrat"].unique().tolist()
+        if len(contrats_in_activity) <= 1:
+            # No other contracts in same activity → use all data
+            df_2023 = df[df["annee"] == 2023].copy()
         else:
-            growth_rate = 0.0
+            df_2023 = df_same_activity[df_same_activity["annee"] == 2023].copy()
+    else:
+        df_2023 = df[df["annee"] == 2023].copy()
 
-    # Apply growth rate to this contract's 2022 consumption
-    actual_2022 = df_contrat[df_contrat['annee'] == 2022]['consommation'].sum()
-    predicted_2023_annual = np.exp(np.log(actual_2022 + 1e-9) + growth_rate)
-    predicted_2023_monthly = predicted_2023_annual * centroid_shape
+    # === Build pivot for similarity ===
+    pivot = (
+        df_2023.pivot_table(
+            index=level_type,
+            columns="mois",
+            values="puissance facturée",
+            aggfunc="sum"
+        )
+        .fillna(0)
+        .reindex(columns=range(1, 13), fill_value=0)
+    )
 
-    # Compute errors if actual 2023 exists
-    actual_2023 = df_contrat[df_contrat['annee'] == 2023]['consommation'].fillna(0).to_numpy()
+    if pivot.empty:
+        print(f"⚠️ No comparable 2023 data for {entity_id}.")
+        return _build_empty_result(df_entity, entity_id, level_type)
+
+    target_vec = (
+        df_entity[df_entity["annee"] == 2023]
+        .sort_values("mois")["puissance facturée"]
+        .fillna(0)
+        .to_numpy()
+        .reshape(1, -1)
+    )
+    if target_vec.size == 0:
+        print(f"⚠️ {label} {entity_id} has no 2023 puissance facturée data.")
+        return _build_empty_result(df_entity, entity_id, level_type)
+
+    # === Find nearest neighbors ===
+    X = pivot.values
+    candidates = pivot.index.to_numpy()
+    knn = NearestNeighbors(n_neighbors=min(5, len(X)), metric="euclidean")
+    knn.fit(X)
+    distances, indices = knn.kneighbors(target_vec)
+
+    similar_entities = [c for c in candidates[indices[0]] if c != entity_id]
+    if not similar_entities:
+        print(f"⚠️ No similar {level_type}s found for {entity_id}.")
+        return _build_empty_result(df_entity, entity_id, level_type)
+
+    best_match_id = similar_entities[0]
+    print(f"✅ Most similar {level_type} found: {best_match_id}")
+
+    # === Find corresponding established result ===
+    prefix = "Contrat" if level_type == "contrat" else "Activité"
+    best_match = next(
+        (r for r in all_results_established if r["entity"] == f"{prefix}_{best_match_id}"),
+        None,
+    )
+    if best_match is None:
+        print(f"⚠️ No established match found for {best_match_id}.")
+        return _build_empty_result(df_entity, entity_id, level_type)
+
+    best_model = best_match["best_model"]
+    valid_years = best_model["valid_years"]
+
+    if not (2022 in valid_years and 2023 in valid_years):
+        print(f"⚠️ Matched {best_match_id} lacks 2022 or 2023 data.")
+        return _build_empty_result(df_entity, entity_id, level_type)
+
+    # === Compute growth rate ===
+    idx_2022 = np.where(valid_years == 2022)[0][0]
+    idx_2023 = np.where(valid_years == 2023)[0][0]
+    actual_2022 = best_model["actual_monthly_matrix"][idx_2022].sum()
+    predicted_2023_similar = best_model["pred_monthly_matrix"][idx_2023].sum()
+
+    growth_rate = np.log(predicted_2023_similar + 1e-9) - np.log(actual_2022 + 1e-9)
+    print(f"📈 Growth rate (log): {growth_rate:.4f}")
+
+    actual_2022_current = df_entity[df_entity["annee"] == 2022]["consommation"].sum()
+    predicted_2023_annual = np.exp(np.log(actual_2022_current + 1e-9) + growth_rate)
+
+    mean_curve = best_model["pred_monthly_matrix"][idx_2023]
+    mean_curve_normalized = mean_curve / (mean_curve.sum() or 1)
+    predicted_2023_monthly = predicted_2023_annual * mean_curve_normalized
+
+    # === Compute actuals and errors ===
+    actual_2023 = (
+        df_entity[df_entity["annee"] == 2023]["consommation"]
+        .fillna(0)
+        .to_numpy()
+    )
     if len(actual_2023) < 12:
         actual_2023 = np.pad(actual_2023, (0, 12 - len(actual_2023)), constant_values=0)
+
     with np.errstate(divide="ignore", invalid="ignore"):
-        error_pct = np.where(actual_2023 != 0, (predicted_2023_monthly - actual_2023) / actual_2023 * 100, np.nan)
+        error_pct_monthly = np.where(
+            actual_2023 != 0,
+            ((predicted_2023_monthly - actual_2023) / actual_2023) * 100,
+            np.nan,
+        )
 
-    best_model = {
-        'pred_monthly_matrix': np.array([predicted_2023_monthly]),
-        'actual_monthly_matrix': actual_2023.reshape(1, -1),
-        'valid_years': np.array([2022, 2023]),
-        'strategy': f"KPrototypes - Growth (Cluster {cluster})",
+    annual_actual = np.float64(actual_2023.sum())
+    annual_pred = np.float64(predicted_2023_monthly.sum())
+    annual_error_pct = (
+        np.nan if annual_actual == 0 else ((annual_pred - annual_actual) / annual_actual) * 100
+    )
+
+    # === Assemble output ===
+    best_model_new = {
+        "pred_monthly_matrix": np.array([predicted_2023_monthly]),
+        "actual_monthly_matrix": np.array([actual_2023]),
+        "valid_years": df_entity["annee"].unique(),
+        "strategy": f"Clustering - Growth ({label})",
     }
 
-    test_years = {
-        '2023_actual_monthly': actual_2023,
-        '2023_predicted_monthly': predicted_2023_monthly,
-        '2023_error_pct_monthly': error_pct,
-        '2023_actual_annual': actual_2023.sum(),
-        '2023_predicted_annual': predicted_2023_annual,
-        '2023_cluster_id': int(cluster),
-        '2023_growth_rate_log': float(growth_rate),
+    result = {
+        "entity": f"{label}_{entity_id}",
+        "best_model": best_model_new,
+        "test_years": {
+            "2023_actual_monthly": actual_2023,
+            "2023_predicted_monthly": predicted_2023_monthly,
+            "2023_error_pct_monthly": error_pct_monthly,
+            "2023_actual_annual": annual_actual,
+            "2023_predicted_annual": annual_pred,
+            "2023_error_pct_annual": annual_error_pct,
+            "2023_source_match": best_match_id,
+        },
     }
 
-    print(f"🚀 Contract {contrat_id} → Cluster {cluster}, Growth Rate: {growth_rate:.4f}")
-    return {
-        "entity": f"Contrat_{contrat_id}",
-        "best_model": best_model,
-        "training_end": None,
-        "monthly_details": {},
-        "test_years": test_years,
+    print(f"✅ Predicted 2023 annual: {predicted_2023_annual:,.2f}")
+    return result
+
+def handle_similarity_entity(df, all_results_established, entity_id, level_type="contrat"):
+    """
+    Generic handler for similarity entities (2023 starters).
+    - For contracts: filter within same activity (fallback to all if alone).
+    - For activities: similarity based on puissance facturée vectors.
+    """
+    if level_type not in ["contrat", "activite"]:
+        raise ValueError("level_type must be either 'contrat' or 'activite'.")
+
+    df_entity = df[df[level_type] == entity_id].copy()
+    if df_entity.empty:
+        print(f"⚠️ {level_type.capitalize()} {entity_id} not found.")
+        return _build_empty_result(df_entity, entity_id, level_type)
+
+    label = level_type.capitalize()
+    print(f"\n🔗 Handling similarity {label}: {entity_id}")
+
+    # === Determine comparison scope ===
+    if level_type == "contrat":
+        activite = df_entity["activite"].iloc[0]
+        df_same_activity = df[df["activite"] == activite].copy()
+        contrats_in_activity = df_same_activity["contrat"].unique().tolist()
+        if len(contrats_in_activity) <= 1:
+            df_2023 = df[df["annee"] == 2023].copy()
+        else:
+            df_2023 = df_same_activity[df_same_activity["annee"] == 2023].copy()
+    else:
+        df_2023 = df[df["annee"] == 2023].copy()
+
+    pivot = (
+        df_2023.pivot_table(
+            index=level_type,
+            columns="mois",
+            values="puissance facturée",
+            aggfunc="sum"
+        )
+        .fillna(0)
+        .reindex(columns=range(1, 13), fill_value=0)
+    )
+
+    if pivot.empty:
+        print(f"⚠️ No comparable 2023 puissance facturée data for {entity_id}.")
+        return _build_empty_result(df_entity, entity_id, level_type)
+
+    target_vec = (
+        df_entity[df_entity["annee"] == 2023]
+        .sort_values("mois")["puissance facturée"]
+        .fillna(0)
+        .to_numpy()
+        .reshape(1, -1)
+    )
+
+    X = pivot.values
+    candidates = pivot.index.to_numpy()
+    knn = NearestNeighbors(n_neighbors=min(5, len(X)), metric="euclidean")
+    knn.fit(X)
+    distances, indices = knn.kneighbors(target_vec)
+
+    similar_entities = [c for c in candidates[indices[0]] if c != entity_id]
+    if not similar_entities:
+        print(f"⚠️ No similar {level_type}s found for {entity_id}.")
+        return _build_empty_result(df_entity, entity_id, level_type)
+
+    best_match_id = similar_entities[0]
+    print(f"✅ Most similar {label} found: {best_match_id}")
+
+    prefix = "Contrat" if level_type == "contrat" else "Activité"
+    best_match = next(
+        (r for r in all_results_established if r["entity"] == f"{prefix}_{best_match_id}"),
+        None,
+    )
+
+    if best_match is None:
+        print(f"⚠️ No established match found for {best_match_id}.")
+        return _build_empty_result(df_entity, entity_id, level_type)
+
+    best_model = best_match["best_model"]
+    if 2023 not in best_model["valid_years"]:
+        print(f"⚠️ Matched {best_match_id} has no 2023 predictions.")
+        return _build_empty_result(df_entity, entity_id, level_type)
+
+    idx_2023 = np.where(best_model["valid_years"] == 2023)[0][0]
+    predicted_2023 = best_model["pred_monthly_matrix"][idx_2023]
+
+    actual_2023 = (
+        df_entity[df_entity["annee"] == 2023]
+        .sort_values("mois")["consommation"]
+        .fillna(0)
+        .to_numpy()
+    )
+    if len(actual_2023) < 12:
+        actual_2023 = np.pad(actual_2023, (0, 12 - len(actual_2023)), constant_values=0)
+
+    with np.errstate(divide="ignore", invalid="ignore"):
+        error_pct_monthly = np.where(
+            actual_2023 != 0,
+            ((predicted_2023 - actual_2023) / actual_2023) * 100,
+            np.nan,
+        )
+
+    annual_actual = np.float64(actual_2023.sum())
+    annual_pred = np.float64(predicted_2023.sum())
+    annual_error_pct = (
+        np.nan if annual_actual == 0 else ((annual_pred - annual_actual) / annual_actual) * 100
+    )
+
+    result = {
+        "entity": f"{label}_{entity_id}",
+        "best_model": {
+            "pred_monthly_matrix": np.array([predicted_2023]),
+            "actual_monthly_matrix": np.array([actual_2023]),
+            "valid_years": df_entity["annee"].unique(),
+            "strategy": f"Clustering - Similarity ({label})",
+        },
+        "test_years": {
+            "2023_actual_monthly": actual_2023,
+            "2023_predicted_monthly": predicted_2023,
+            "2023_error_pct_monthly": error_pct_monthly,
+            "2023_actual_annual": annual_actual,
+            "2023_predicted_annual": annual_pred,
+            "2023_error_pct_annual": annual_error_pct,
+            "2023_source_match": best_match_id,
+        },
     }
 
+    print(f"🔁 Reused 2023 predictions from {label} {best_match_id}")
+    return result
 
 
 def filter_established_contracts(all_results, growth_contracts, similarity_contracts):
@@ -708,6 +841,26 @@ def filter_established_contracts(all_results, growth_contracts, similarity_contr
 
     print(f"🧹 Removed {len(all_results) - len(filtered)} non-established contracts "
           f"({len(filtered)} remaining).")
+    return filtered
+
+def filter_established_entities(all_results, growth_entities, similarity_entities, level_type="contrat"):
+    if level_type not in ["contrat", "activite"]:
+        raise ValueError("level_type must be either 'contrat' or 'activite'.")
+
+    prefix = "Contrat" if level_type == "contrat" else "Activité"
+
+    # --- Variable part: construct exclusion set ---
+    excluded_entities = {
+        f"{prefix}_{eid}" for eid in list(growth_entities) + list(similarity_entities)
+    }
+
+    # --- Fixed part: filter results ---
+    filtered = [r for r in all_results if r.get("entity") not in excluded_entities]
+
+    print(
+        f"🧹 Removed {len(all_results) - len(filtered)} non-established {level_type}s "
+        f"({len(filtered)} remaining)."
+    )
     return filtered
 
 # ===========================
@@ -760,13 +913,13 @@ if 1 in RUN_LEVELS:
     all_results_growth = []
     for contrat in growth_contracts:
         # all_results_growth.append(handle_growth_contract_kproto(df_contrats, kproto, cluster_profiles, contrat))
-        all_results_growth.append(handle_growth_contract(df_contrats, all_results_established, contrat))
+        all_results_growth.append(handle_growth_entity(df_contrats, all_results_established, contrat))
 
 
     all_results_similarity = []
     for contrat in similarity_contracts:
         # all_results_similarity.append(handle_similarity_contract_kproto(df_contrats, kproto, cluster_profiles, contrat))
-        all_results_similarity.append(handle_similarity_contract(df_contrats, all_results_established, contrat))
+        all_results_similarity.append(handle_similarity_entity(df_contrats, all_results_established, contrat))
     
     all_results_contrats = all_results_established + all_results_similarity + all_results_growth
     all_results += all_results_contrats
@@ -800,32 +953,6 @@ if 2 in RUN_LEVELS:
 
 if 3 in RUN_LEVELS:
     print(f"\n{'#'*60}")
-    print(f"LEVEL 2: ACTIVITE")
-    print(f"{'#'*60}")
-
-    activites = sorted(df_contrats['activite'].unique())
-
-    for i, activite in enumerate(activites):
-        df_activite = df_contrats[df_contrats['activite'] == activite].copy()
-        df_activite = df_activite.groupby(['annee', 'mois']).agg({
-            VARIABLE: 'sum',
-            'temperature': 'mean',
-            'puissance facturée': 'sum'
-        }).reset_index()
-
-        result = run_analysis_for_entity(
-            df_activite, 
-            f"Activité_{activite}", 
-            df_features,
-            config = ANALYSIS_CONFIG,
-            favor_overestimation=False,
-            under_estimation_penalty = 1.5,
-        )
-        if result:
-            all_results.append(result)
-
-if 3 in RUN_LEVELS:
-    print(f"\n{'#'*60}")
     print(f"LEVEL 3: ACTIVITE")
     print(f"{'#'*60}")
 
@@ -852,38 +979,42 @@ if 3 in RUN_LEVELS:
     print(f"🔗 Similarity activites: {len(similarity_activites)}")
 
     # --- Process established activities ---
-    all_results_established_activite = []
-    for activite in established_activites:
-        df_activite = df_contrats[df_contrats['activite'] == activite].copy()
-        df_activite = df_activite.groupby(['annee', 'mois']).agg({
-            VARIABLE: 'sum',
-            'temperature': 'mean',
-            'puissance facturée': 'sum'
-        }).reset_index()
+    # all_results_established_activite = []
+    # for activite in established_activites:
+    #     df_activite = df_contrats[df_contrats['activite'] == activite].copy()
+    #     df_activite = df_activite.groupby(['annee', 'mois']).agg({
+    #         VARIABLE: 'sum',
+    #         'temperature': 'mean',
+    #         'puissance facturée': 'sum'
+    #     }).reset_index()
 
-        result = run_analysis_for_entity(
-            df_activite,
-            f"Activite_{activite}",
-            df_features,
-            config=ANALYSIS_CONFIG,
-            favor_overestimation=False,
-            under_estimation_penalty=1.5,
-        )
-        if result:
-            all_results_established_activite.append(result)
+    #     result = run_analysis_for_entity(
+    #         df_activite,
+    #         f"Activité_{activite}",
+    #         df_features,
+    #         config=ANALYSIS_CONFIG,
+    #         favor_overestimation=False,
+    #         under_estimation_penalty=1.5,
+    #     )
+    #     if result:
+    #         all_results_established_activite.append(result)
+
+    all_results_established_activite = joblib.load(PROJECT_ROOT / "outputs_cd/all_results_activite_overestimation.pkl")
+    all_results_established_activite = filter_established_entities(all_results_established_activite, growth_activites, similarity_activites, "activite")
+
 
     # --- Process growth activities ---
     all_results_growth_activite = []
     for activite in growth_activites:
         all_results_growth_activite.append(
-            handle_growth_contract(df_contrats, all_results_established_activite, activite)
+            handle_growth_entity(df_contrats, all_results_established_activite, activite, "activite")
         )
 
     # --- Process similarity activities ---
     all_results_similarity_activite = []
     for activite in similarity_activites:
         all_results_similarity_activite.append(
-            handle_similarity_contract(df_contrats, all_results_established_activite, activite)
+            handle_similarity_entity(df_contrats, all_results_established_activite, activite, "activite")
         )
 
     # --- Merge all ---
