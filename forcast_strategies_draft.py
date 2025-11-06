@@ -1538,7 +1538,7 @@ def compute_empirical_CIs(best, target_year=2023, alpha=0.05):
 
     return monthly_ci_residuals, np.array([annual_lo, annual_hi])
 
-def get_move_in_year(df):
+def get_move_in_year(df, not_started_yet_th = 20):
     """
     Extract the first non-null 'Date d'emménagement' value from a DataFrame
     and return its year as an integer, or None if not available.
@@ -1554,9 +1554,17 @@ def get_move_in_year(df):
     move_in_date = safe_parse_date(move_in_val.iloc[0])
     if move_in_date is None:
         return None
+    move_in_year = move_in_date.year
+    
+    max_year = df["annee"].max()
+    annual_consumption = df[df["annee"] == move_in_year]["consommation"].sum()
+    while annual_consumption < not_started_yet_th:
+        move_in_year+=1
+        if move_in_year >= max_year:
+            break
+        annual_consumption = df[df["annee"] == move_in_year]["consommation"].sum()
 
-    return move_in_date.year
-
+    return move_in_year
 
 def run_analysis_for_entity(
     df,
@@ -1638,7 +1646,7 @@ def run_analysis_for_entity(
 
     monthly_matrix = create_monthly_matrix(valid_data, value_col=value_col)
     years = np.array(sorted(valid_data["annee"].unique()))
-
+    print(years)
     clients_lookup = _normalize_monthly_lookup(client_predictions)
 
     # Run all strategies with ULTRA-STRICT LOOCV

@@ -2,6 +2,8 @@ import pandas as pd
 from sklearn.metrics import mean_absolute_error, r2_score
 import matplotlib.pyplot as plt
 import numpy as np
+from datetime import datetime
+
 
 def custom_mean_absolute_percentage_error(y_true, y_pred, ignore_zeros=True):
     y_true = np.array(y_true)
@@ -132,11 +134,11 @@ def add_exogenous_features(
     return np.hstack([X_lags, exog_array])
 
 
-def add_monthly_temp(X, years, df_monthly):
-    """Add monthly temperature features"""
+def add_monthly_feature(X, years, df_monthly, feature = "temperature", agg_method = "mean"):
+    """Add monthly feature values"""
     temp_data = []
     for year in years:
-        year_temps = df_monthly[df_monthly['annee'] == year].groupby('mois')['temperature'].mean()
+        year_temps = df_monthly[df_monthly['annee'] == year].groupby('mois')[feature].agg(agg_method)
         temps = []
         for m in range(1, 13):
             val = year_temps.get(m, 0)
@@ -148,6 +150,20 @@ def add_monthly_temp(X, years, df_monthly):
     temp_array = np.array(temp_data)
     temp_array = np.nan_to_num(temp_array, nan=0.0)
     return np.hstack([X, temp_array])
+
+
+def add_yearly_feature(X, years, df_yearly, feature="temperature", agg_method="mean"):
+    """Add yearly feature values"""
+    yearly_data = []
+    for year in years:
+        val = df_yearly[df_yearly['annee'] == year][feature].agg(agg_method)
+        if pd.isna(val):
+            val = 0
+        yearly_data.append([val])
+
+    yearly_array = np.array(yearly_data)
+    yearly_array = np.nan_to_num(yearly_array, nan=0.0)
+    return np.hstack([X, yearly_array])
 
 
 def safe_metric(func, y_true, y_pred):
@@ -181,3 +197,35 @@ def select_best_model(results, r2_threshold):
         return max(results, key=lambda x: x['annual_r2'])
 
     return min(valid_results, key=lambda x: x['annual_mae'])
+
+def safe_parse_date(x):
+    """Try to parse a date or datetime string safely (return None if it fails)."""
+    if pd.isna(x) or x in ['', None]:
+        return None
+
+    # If it's already a datetime or pandas Timestamp, return as datetime
+    if isinstance(x, (datetime, pd.Timestamp)):
+        return x if isinstance(x, datetime) else x.to_pydatetime()
+
+    x = str(x).strip()
+
+    # Try common date formats
+    common_formats = [
+        "%Y-%m-%d",
+        "%d.%m.%Y",
+        "%d/%m/%Y",
+        "%Y/%m/%d",
+        "%Y-%m-%d %H:%M:%S",
+        "%d-%m-%Y",
+        "%m/%d/%Y",          # US-style
+        "%d %b %Y",          # e.g., 24 Nov 2022
+        "%d %B %Y",          # e.g., 24 November 2022
+    ]
+
+    for fmt in common_formats:
+        try:
+            return datetime.strptime(x, fmt)
+        except ValueError:
+            continue
+
+    return None  # could not parse

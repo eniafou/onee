@@ -27,7 +27,7 @@ PCA_LAMBDAS = [0.3, 0.7, 1.0]
 
 training_end = None
 use_monthly_temp_options = [False]
-use_monthly_clients_options = [False]#[True, False]
+use_monthly_clients_options = [False] #[True, False]
 client_pattern_weights = [0.3, 0.5, 0.8]
 training_windows = [4, 7, 10]
 FEATURE_BLOCKS = {

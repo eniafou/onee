@@ -32,7 +32,7 @@ DB_DIST_PATH = PROJECT_ROOT / 'data/ONEE_Distributeurs_consumption.db'
 TARGET_REGION = "Casablanca-Settat"
 TARGET_ACTIVITY = "total" #"Menages"
 VARIABLE = "consommation_kwh"
-TRAINING_END = 2009
+TRAINING_END = 2008
 TRAIN_WINDOW = None
 # Model settings
 INCLUDE_AR = True          # Include autoregressive component ρ*Δlog(y_t)
@@ -350,8 +350,8 @@ class MeanRevertingGrowthModel:
         """
         y = np.asarray(y, dtype=float).flatten()
         
-        if len(y) < 3:
-            raise ValueError("Need at least 3 years of data")
+        # if len(y) < 3:
+        #     raise ValueError("Need at least 3 years of data")
         
         # Compute growth rates
         growth_rates = np.diff(np.log(y))
@@ -505,9 +505,10 @@ def time_series_cv_evaluate(df_annual: pd.DataFrame,
         split_idx = df_annual[df_annual['annee'] <= training_end].index[-1] + 1
     else:
         split_idx = len(df_annual) - 3
-    
-    if split_idx < 3:
-        raise ValueError("Not enough training data")
+    print("########")
+    print(split_idx)
+    # if split_idx < 3:
+    #     raise ValueError("Not enough training data")
     
     print(f"\n{'='*70}")
     print(f"TIME-SERIES CROSS-VALIDATION")

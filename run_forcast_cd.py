@@ -6,7 +6,7 @@ import warnings
 import pandas as pd
 import sqlite3
 from pathlib import Path
-from forcast_strategies import run_analysis_for_entity, save_summary
+from forcast_strategies_draft import run_analysis_for_entity, save_summary
 import pickle
 
 warnings.filterwarnings('ignore')
@@ -18,7 +18,7 @@ PROJECT_ROOT = Path(__file__).resolve().parents[0]
 
 VARIABLE = "consommation"
 UNIT = "Mwh"
-exp_name = "activite_s4_nan"
+exp_name = "contrat_s4_overestimation"
 
 
 N_PCS = 3
@@ -31,8 +31,9 @@ PCA_LAMBDAS = [0.3, 0.7, 1.0]
 training_end = None
 use_monthly_temp_options = [False]
 use_monthly_clients_options = [False]
+use_pf_options = [True, False]
 client_pattern_weights = [0.3, 0.5, 0.8]
-training_windows = [2,3,4]
+training_windows = [2,3,4] #0,1
 
 FEATURE_BLOCKS = {
     'none': [],
@@ -42,7 +43,7 @@ FEATURE_BLOCKS = {
 }
 eval_years_start = 2021
 eval_years_end = 2023
-
+train_start_year = 2018
 
 ANALYSIS_CONFIG = {
     "value_col": VARIABLE,
@@ -57,15 +58,17 @@ ANALYSIS_CONFIG = {
     "training_end": training_end,
     "use_monthly_temp_options": use_monthly_temp_options,
     "use_monthly_clients_options": use_monthly_clients_options,
+    "use_pf_options":use_pf_options,
     "client_pattern_weights": client_pattern_weights,
     "training_windows": training_windows,
+    "train_start_year": train_start_year,
     "eval_years_end": eval_years_end,
     "eval_years_start": eval_years_start,
 }
 # ============================================================================
 # LOAD DATA
 # ============================================================================
-db_path = PROJECT_ROOT / 'data/ONEE_Regional_COMPLETE.db'
+db_path = PROJECT_ROOT / 'data/ONEE_Regional_COMPLETE_2007_2023.db'
 
 db_regional = sqlite3.connect(db_path)
 
@@ -93,7 +96,7 @@ df_contrats = pd.read_csv(df_path)
 # ============================================================================
 # Choose which analysis parts (levels) to run
 # 1: Contrat, 2: Partenaire (client), 3: Activities
-RUN_LEVELS = {3}
+RUN_LEVELS = {1}
 
 output_file =  PROJECT_ROOT / f'outputs_cd/{exp_name}.xlsx'
 monthly_output_file = PROJECT_ROOT / f'outputs_cd/{exp_name}_monthly_forcasts.xlsx'
@@ -112,44 +115,36 @@ if 1 in RUN_LEVELS:
             df_contrat, 
             f"Contrat_{contrat}", 
             df_features,
-            df_contrats,
             config = ANALYSIS_CONFIG,
             under_estimation_penalty = 2,
         )
         if result:
             all_results.append(result)
-        
-        if i%10 == 0:
-            save_summary(all_results, output_file, monthly_output_file)
 
 if 2 in RUN_LEVELS:
     print(f"\n{'#'*60}")
     print(f"LEVEL 2: PARTENAIRE")
     print(f"{'#'*60}")
 
-    # partenaires = sorted(df_contrats['partenaire'].unique())
-    partenaires = ["ONCF"]
+    partenaires = sorted(df_contrats['partenaire'].unique())
 
     for i, partenaire in enumerate(partenaires):
         df_partenaire = df_contrats[df_contrats['partenaire'] == partenaire].copy()
         df_partenaire = df_partenaire.groupby(['annee', 'mois']).agg({
             VARIABLE: 'sum',
-            'temperature': 'mean'
+            'temperature': 'mean',
+            'puissance facturée': 'sum'
         }).reset_index()
 
         result = run_analysis_for_entity(
             df_partenaire, 
             f"Partenaire_{partenaire}", 
             df_features,
-            df_partenaire, 
             config = ANALYSIS_CONFIG,
             under_estimation_penalty = 2,
         )
         if result:
             all_results.append(result)
-        
-        if i%10 == 0:
-            save_summary(all_results, output_file, monthly_output_file)
 
 
 if 3 in RUN_LEVELS:
@@ -157,30 +152,25 @@ if 3 in RUN_LEVELS:
     print(f"LEVEL 2: ACTIVITE")
     print(f"{'#'*60}")
 
-    # activites = sorted(df_contrats['activite'].unique())
-    activites = ["industries alimentaires"]
+    activites = sorted(df_contrats['activite'].unique())
 
     for i, activite in enumerate(activites):
         df_activite = df_contrats[df_contrats['activite'] == activite].copy()
         df_activite = df_activite.groupby(['annee', 'mois']).agg({
             VARIABLE: 'sum',
-            'temperature': 'mean'
+            'temperature': 'mean',
+            'puissance facturée': 'sum'
         }).reset_index()
 
         result = run_analysis_for_entity(
             df_activite, 
             f"Activité_{activite}", 
             df_features,
-            df_activite, 
             config = ANALYSIS_CONFIG,
-            favor_overestimation=False,
             under_estimation_penalty = 1,
         )
         if result:
             all_results.append(result)
-        
-        if i%10 == 0:
-            save_summary(all_results, output_file, monthly_output_file)
 
 
 save_summary(all_results, output_file, monthly_output_file)
