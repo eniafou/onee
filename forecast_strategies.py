@@ -8,7 +8,8 @@ from onee.utils import (
     calculate_all_metrics,
     select_best_model,
     add_yearly_feature,
-    safe_parse_date
+    safe_parse_date,
+    get_move_in_year
 )
 import numpy as np
 import pandas as pd
@@ -354,7 +355,7 @@ def build_growth_rate_features(
     use_clients: bool = False,
     df_monthly: pd.DataFrame = None,
     use_pf: bool = False,
-    transforms: Iterable[str] = ("level",),
+    transforms: Iterable[str] = ("lag_lchg",),
     lags: Iterable[int] = (1,),
 ) -> Optional[np.ndarray]:
     """
@@ -1314,8 +1315,8 @@ def strategy4_ultra_strict_loocv(
     use_monthly_clients_options=[False],
     use_pf_options = [False],
     client_pattern_weights=None,
-    growth_feature_transforms: Iterable[str] = ("level",),
-    growth_feature_lags: Iterable[int] = (1,),
+    growth_feature_transforms: Iterable[Iterable[str]] = (("level",),),
+    growth_feature_lags: Iterable[Iterable[int]] = ((1,),),
     training_windows=[10],
 ):
     GROWTH_MODEL_L2: float = 10.0
@@ -1330,8 +1331,38 @@ def strategy4_ultra_strict_loocv(
     )
     clients_lookup = monthly_clients_lookup or {}
 
-    for (fb_name, fb_features), training_window, use_clients, use_pf in product(
-        feature_blocks.items(), training_windows, use_monthly_clients_options, use_pf_options
+    # Normalize/compatibility: callers may pass a single iterable of transforms/lags
+    # (e.g. ("lag_lchg",)) or a list of such iterables. We want a list of tuples
+    # where each element is an iterable of transforms or lags respectively.
+    if isinstance(growth_feature_transforms, (list, tuple)) and all(
+        isinstance(x, str) for x in growth_feature_transforms
+    ):
+        transforms_options = [tuple(growth_feature_transforms)]
+    else:
+        transforms_options = [tuple(x) for x in growth_feature_transforms]
+
+    if isinstance(growth_feature_lags, (list, tuple)) and all(
+        isinstance(x, (int, np.integer)) for x in growth_feature_lags
+    ):
+        lags_options = [tuple(growth_feature_lags)]
+    else:
+        lags_options = [tuple(x) for x in growth_feature_lags]
+
+    # Iterate over combinations including growth feature transform/lags option-sets
+    for (
+        (fb_name, fb_features),
+        training_window,
+        use_clients,
+        use_pf,
+        transforms_option,
+        lags_option,
+    ) in product(
+        feature_blocks.items(),
+        training_windows,
+        use_monthly_clients_options,
+        use_pf_options,
+        transforms_options,
+        lags_options,
     ):
         weight_options = (
             client_pattern_weights if (use_clients and clients_lookup) else [None]
@@ -1368,8 +1399,8 @@ def strategy4_ultra_strict_loocv(
                 use_clients = use_clients,
                 df_monthly=df_monthly,
                 use_pf=use_pf,
-                transforms=growth_feature_transforms,
-                lags=growth_feature_lags,
+                transforms=transforms_option,
+                lags=lags_option,
             )
             include_exog = bool(
                 train_features is not None and train_features.shape[1] > 0
@@ -1396,8 +1427,8 @@ def strategy4_ultra_strict_loocv(
                 df_features,
                 clients_lookup=clients_lookup if use_clients else None,
                 use_clients=False,  # bool(use_clients and clients_lookup),
-                transforms=growth_feature_transforms,
-                lags=growth_feature_lags,
+                transforms=transforms_option,
+                lags=lags_option,
             )
 
             if include_exog:
@@ -1489,9 +1520,12 @@ def strategy4_ultra_strict_loocv(
                     "n_lags": None,
                     "feature_block": fb_name,
                     "use_monthly_temp": False,
+                    "use_pf": use_pf,
                     "use_monthly_clients": bool(use_clients and clients_lookup),
                     "client_pattern_weight": weight if weight is not None else None,
                     "pc_weight": None,
+                    "growth_feature_transforms": tuple(transforms_option),
+                    "growth_feature_lags": tuple(lags_option),
                     "pred_monthly_matrix": all_predictions,
                     "actual_monthly_matrix": all_actuals,
                     "valid_years": np.array(valid_years_list),
@@ -1537,34 +1571,6 @@ def compute_empirical_CIs(best, target_year=2023, alpha=0.05):
     annual_hi = np.percentile(resid_annual, hi_q)
 
     return monthly_ci_residuals, np.array([annual_lo, annual_hi])
-
-def get_move_in_year(df, not_started_yet_th = 20):
-    """
-    Extract the first non-null 'Date d'emménagement' value from a DataFrame
-    and return its year as an integer, or None if not available.
-    """
-    if 'Date d\'emménagement' not in df.columns:
-        return None
-
-    move_in_val = df['Date d\'emménagement'].dropna()
-    if move_in_val.empty:
-        return None
-
-    from datetime import datetime
-    move_in_date = safe_parse_date(move_in_val.iloc[0])
-    if move_in_date is None:
-        return None
-    move_in_year = move_in_date.year
-    
-    max_year = df["annee"].max()
-    annual_consumption = df[df["annee"] == move_in_year]["consommation"].sum()
-    while annual_consumption < not_started_yet_th:
-        move_in_year+=1
-        if move_in_year >= max_year:
-            break
-        annual_consumption = df[df["annee"] == move_in_year]["consommation"].sum()
-
-    return move_in_year
 
 def run_analysis_for_entity(
     df,
@@ -1620,8 +1626,8 @@ def run_analysis_for_entity(
     use_monthly_clients_options = config.get("use_monthly_clients_options", [False])
     use_pf_options = config.get("use_pf_options", [False])
     client_pattern_weights = config.get("client_pattern_weights", [0.3, 0.5, 0.8])
-    growth_feature_transforms = config.get("growth_feature_transforms", ("lag_lchg",))
-    growth_feature_lags = config.get("growth_feature_lags", (1,))
+    growth_feature_transforms = config.get("growth_feature_transforms", [("lag_lchg",)])
+    growth_feature_lags = config.get("growth_feature_lags", [(1,)])
     training_windows = config.get("training_windows", [4, 7, 10])
     train_start_year = config.get("train_start_year", 2007)
     eval_years_start = config.get("eval_years_start", 2021)
@@ -1646,7 +1652,6 @@ def run_analysis_for_entity(
 
     monthly_matrix = create_monthly_matrix(valid_data, value_col=value_col)
     years = np.array(sorted(valid_data["annee"].unique()))
-    print(years)
     clients_lookup = _normalize_monthly_lookup(client_predictions)
 
     # Run all strategies with ULTRA-STRICT LOOCV
@@ -1751,7 +1756,7 @@ def run_analysis_for_entity(
             print(f"✓ Created ensemble using {len(valid_models)} valid strategies")
 
     # Select best
-    if favor_overestimation:
+    if favor_overestimation and len(ensemble_results) > 0:
         all_results = ensemble_results
     else:
         all_results = (

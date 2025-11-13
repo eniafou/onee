@@ -6,3 +6,5 @@ outputs_srm/
 record/
 *.egg-info/
 *.egg
+artifacts/
+temp.py

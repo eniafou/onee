@@ -32,7 +32,7 @@ DB_DIST_PATH = PROJECT_ROOT / 'data/ONEE_Distributeurs_consumption.db'
 TARGET_REGION = "Casablanca-Settat"
 TARGET_ACTIVITY = "total" #"Menages"
 VARIABLE = "consommation_kwh"
-TRAINING_END = 2008
+TRAINING_END = 2018
 TRAIN_WINDOW = None
 # Model settings
 INCLUDE_AR = True          # Include autoregressive component ρ*Δlog(y_t)
@@ -505,8 +505,6 @@ def time_series_cv_evaluate(df_annual: pd.DataFrame,
         split_idx = df_annual[df_annual['annee'] <= training_end].index[-1] + 1
     else:
         split_idx = len(df_annual) - 3
-    print("########")
-    print(split_idx)
     # if split_idx < 3:
     #     raise ValueError("Not enough training data")
     
