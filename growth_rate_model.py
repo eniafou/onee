@@ -30,7 +30,7 @@ DB_DIST_PATH = PROJECT_ROOT / 'data/ONEE_Distributeurs_consumption.db'
 
 # Analysis settings
 TARGET_REGION = "Casablanca-Settat"
-TARGET_ACTIVITY = "total" #"Menages"
+TARGET_ACTIVITY = "Administratif" #"Menages"
 VARIABLE = "consommation_kwh"
 TRAINING_END = 2018
 TRAIN_WINDOW = None
@@ -260,28 +260,40 @@ class MeanRevertingGrowthModel:
     """
     Mean-reverting growth rate model with constrained optimization.
     
-    Model: Δlog(y_{t+1}) = (1-ρ)μ + ρ*Δlog(y_t) + z_t'γ + ε
+    Model: Δlog(y_{t+1}) = (1-ρ)μ + ρ*Δlog(y_t) + β*[Δlog(y_t)]² + z_t'γ + ε
     
     Parameters:
         - μ: long-run mean growth rate
         - ρ: mean-reversion speed (constrained to [0, 1))
+        - β: squared AR term coefficient
         - γ: coefficients for exogenous features
+        - use_asymmetric_loss: whether to use asymmetric loss that penalizes underestimation
+        - underestimation_penalty: multiplier for underestimation errors (e.g., 2.0 or 3.0)
     """
     
     def __init__(self, 
                  include_ar: bool = True,
+                 include_ar_squared: bool = False,
                  include_exog: bool = True,
                  l2_penalty: float = 1.0,
-                 rho_bounds: Tuple[float, float] = (0.0, 0.99)):
+                 rho_bounds: Tuple[float, float] = (0.0, 0.99),
+                 beta_bounds: Tuple[float, float] = (-1.0, 1.0),
+                 use_asymmetric_loss: bool = False,
+                 underestimation_penalty: float = 2.0):
         
         self.include_ar = include_ar
+        self.include_ar_squared = include_ar_squared
         self.include_exog = include_exog
         self.l2_penalty = l2_penalty
         self.rho_bounds = rho_bounds
+        self.beta_bounds = beta_bounds
+        self.use_asymmetric_loss = use_asymmetric_loss
+        self.underestimation_penalty = underestimation_penalty
         
         # Fitted parameters
         self.mu = None
         self.rho = None
+        self.beta = None
         self.gamma = None
         self.scaler = None
         
@@ -292,12 +304,14 @@ class MeanRevertingGrowthModel:
     def _objective(self, params: np.ndarray, growth_rates: np.ndarray, 
                    X_scaled: Optional[np.ndarray]) -> float:
         """
-        Objective function: MSE + L2 penalty.
+        Objective function: MSE (or asymmetric loss) + L2 penalty.
         
         params structure depends on configuration:
         - AR only: [μ, ρ]
+        - AR + AR²: [μ, ρ, β]
         - Exog only: [μ, γ_1, ..., γ_k]
-        - Both: [μ, ρ, γ_1, ..., γ_k]
+        - AR + Exog: [μ, ρ, γ_1, ..., γ_k]
+        - AR + AR² + Exog: [μ, ρ, β, γ_1, ..., γ_k]
         - Neither: [μ]
         """
         
@@ -311,6 +325,12 @@ class MeanRevertingGrowthModel:
         else:
             rho = 0.0
         
+        if self.include_ar_squared:
+            beta = params[idx]
+            idx += 1
+        else:
+            beta = 0.0
+        
         if self.include_exog and X_scaled is not None:
             gamma = params[idx:]
         else:
@@ -321,24 +341,42 @@ class MeanRevertingGrowthModel:
         y_pred = np.zeros(n)
         
         for i in range(n):
-            # Δlog(y_{t+1}) = (1-ρ)μ + ρ*Δlog(y_t) + z_t'γ
+            # Δlog(y_{t+1}) = (1-ρ)μ + ρ*Δlog(y_t) + β*[Δlog(y_t)]² + z_t'γ
             y_pred[i] = (1 - rho) * mu + rho * growth_rates[i]
+            
+            if self.include_ar_squared:
+                y_pred[i] += beta * (growth_rates[i] ** 2)
             
             if self.include_exog and X_scaled is not None:
                 y_pred[i] += np.dot(X_scaled[i], gamma)
         
         y_true = growth_rates[1:]
+        errors = y_true - y_pred
         
-        # MSE
-        mse = np.mean((y_true - y_pred) ** 2)
+        # Compute loss based on mode
+        if self.use_asymmetric_loss:
+            # Asymmetric loss: penalize underestimation more heavily
+            # When y_true > y_pred (underestimation), apply penalty multiplier
+            # When y_true < y_pred (overestimation), use standard squared error
+            squared_errors = errors ** 2
+            underestimation_mask = errors > 0  # True where we underestimated
+            
+            # Apply penalty multiplier to underestimation errors
+            weighted_errors = squared_errors.copy()
+            weighted_errors[underestimation_mask] *= self.underestimation_penalty
+            
+            loss = np.mean(weighted_errors)
+        else:
+            # Standard MSE
+            loss = np.mean(errors ** 2)
         
-        # L2 penalty (exclude μ and ρ from regularization, only penalize γ)
+        # L2 penalty (exclude μ, ρ, and β from regularization, only penalize γ)
         if self.include_exog and len(gamma) > 0:
             l2_term = self.l2_penalty * np.sum(gamma ** 2)
         else:
             l2_term = 0.0
         
-        return mse + l2_term
+        return loss + l2_term
     
     def fit(self, y: np.ndarray, X: Optional[np.ndarray] = None):
         """
@@ -350,8 +388,8 @@ class MeanRevertingGrowthModel:
         """
         y = np.asarray(y, dtype=float).flatten()
         
-        # if len(y) < 3:
-        #     raise ValueError("Need at least 3 years of data")
+        if len(y) < 3:
+            raise ValueError("Need at least 3 years of data")
         
         # Compute growth rates
         growth_rates = np.diff(np.log(y))
@@ -386,6 +424,10 @@ class MeanRevertingGrowthModel:
             params_init.append(0.5)  # ρ initial guess
             bounds.append(self.rho_bounds)
         
+        if self.include_ar_squared:
+            params_init.append(0.0)  # β initial guess
+            bounds.append(self.beta_bounds)
+        
         if self.include_exog and X_scaled is not None:
             k = X_scaled.shape[1]
             params_init.extend([0.0] * k)  # γ initial guess
@@ -417,6 +459,12 @@ class MeanRevertingGrowthModel:
         else:
             self.rho = 0.0
         
+        if self.include_ar_squared:
+            self.beta = result.x[idx]
+            idx += 1
+        else:
+            self.beta = 0.0
+        
         if self.include_exog and X_scaled is not None:
             self.gamma = result.x[idx:]
         else:
@@ -438,11 +486,14 @@ class MeanRevertingGrowthModel:
         Returns:
             Predicted consumption level
         """
-        # Δlog(y_{t+1}) = (1-ρ)μ + ρ*Δlog(y_t) + z_t'γ
+        # Δlog(y_{t+1}) = (1-ρ)μ + ρ*Δlog(y_t) + β*[Δlog(y_t)]² + z_t'γ
         predicted_growth = (1 - self.rho) * self.mu
         
         if self.include_ar:
             predicted_growth += self.rho * self.last_growth_rate
+        
+        if self.include_ar_squared:
+            predicted_growth += self.beta * (self.last_growth_rate ** 2)
         
         if self.include_exog and X_next is not None and self.scaler is not None:
             X_next = np.asarray(X_next, dtype=float).flatten().reshape(1, -1)
@@ -464,17 +515,20 @@ class MeanRevertingGrowthModel:
         params = {
             'mu': self.mu,
             'rho': self.rho,
+            'beta': self.beta,
             'gamma': self.gamma,
             'include_ar': self.include_ar,
+            'include_ar_squared': self.include_ar_squared,
             'include_exog': self.include_exog,
             'l2_penalty': self.l2_penalty,
+            'use_asymmetric_loss': self.use_asymmetric_loss,
+            'underestimation_penalty': self.underestimation_penalty,
         }
         
         if self.include_ar:
             params['half_life'] = -np.log(2) / np.log(self.rho) if self.rho > 0 else np.inf
         
         return params
-
 
 # ============================================================================
 # 3. EVALUATION
