@@ -1,6 +1,6 @@
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import Ridge
-from growth_rate_model import MeanRevertingGrowthModel
+from growth_rate_model import MeanRevertingGrowthModel, build_growth_rate_features
 from onee.utils import (
     add_monthly_feature,
     add_exogenous_features,
@@ -8,12 +8,12 @@ from onee.utils import (
     calculate_all_metrics,
     select_best_model,
     add_yearly_feature,
-    safe_parse_date,
-    get_move_in_year
+    get_move_in_year,
+    add_annual_client_feature
 )
 import numpy as np
 import pandas as pd
-from typing import Dict, Iterable, Mapping, Optional, Tuple
+from typing import Dict, Iterable, Mapping, Optional
 from itertools import product
 
 
@@ -322,160 +322,9 @@ def add_monthly_client_feature(
     return np.hstack([X, series_array])
 
 
-def add_annual_client_feature(
-    X: np.ndarray, years: Iterable[int], series_lookup: Mapping[int, np.ndarray]
-) -> np.ndarray:
-    """
-    Append the annual sum of monthly client predictions per year.
-    """
-    if not series_lookup:
-        return X
-
-    annual_values = []
-    for year in years:
-        series = series_lookup.get(int(year))
-        if series is None:
-            annual_values.append([0.0])
-        else:
-            annual_values.append([float(np.sum(series))])
-
-    if not annual_values:
-        return X
-
-    annual_array = np.array(annual_values, dtype=float)
-    return np.hstack([X, annual_array])
 
 
-def build_growth_rate_features(
-    years: Iterable[int],
-    feature_block: Iterable[str],
-    df_features: pd.DataFrame,
-    *,
-    clients_lookup: Optional[Mapping[int, np.ndarray]] = None,
-    use_clients: bool = False,
-    df_monthly: pd.DataFrame = None,
-    use_pf: bool = False,
-    transforms: Iterable[str] = ("lag_lchg",),
-    lags: Iterable[int] = (1,),
-) -> Optional[np.ndarray]:
-    """
-    Assemble feature matrix for the growth-rate model aligned with `years`.
-    Returns `None` when no contextual features are available.
-    """
-    years_list = [int(y) for y in years]
-    if not years_list:
-        return None
 
-    feature_cols = list(feature_block) if feature_block else []
-    if not feature_cols and not (use_clients and clients_lookup) and not use_pf:
-        return None
-
-    df = df_features.copy()
-    if "annee" not in df.columns:
-        raise ValueError("df_features must contain an 'annee' column.")
-
-    cols = ["annee"] + feature_cols if feature_cols else ["annee"]
-    df = (
-        df[cols]
-        .drop_duplicates(subset=["annee"])
-        .sort_values("annee")
-        .set_index("annee")
-    )
-
-    if feature_cols:
-        base_levels = df[feature_cols].astype(float)
-
-        # Handle missing values similarly to prepare_activity_data
-        for col in feature_cols:
-            series = base_levels[col]
-            if series.isnull().any():
-                series_interp = series.interpolate(
-                    method="linear", limit_direction="both"
-                )
-                if series_interp.isnull().any():
-                    series_interp = series_interp.fillna(series.mean())
-                base_levels[col] = series_interp
-    else:
-        base_levels = pd.DataFrame(index=df.index)
-
-    transforms = tuple(transforms) if transforms else ()
-    lags = tuple(lags) if lags else ()
-
-    transformed_frames = []
-    column_order: list[str] = []
-
-    if "level" in transforms and not base_levels.empty:
-        transformed_frames.append(base_levels)
-        column_order.extend(base_levels.columns.tolist())
-
-    lchg_df = None
-    if ("lchg" in transforms or "lag_lchg" in transforms) and not base_levels.empty:
-        lchg_df = pd.DataFrame(index=base_levels.index)
-        for col in base_levels.columns:
-            s = base_levels[col]
-            prev = s.shift(1)
-            valid = (s > 0) & (prev > 0)
-            lchg = pd.Series(
-                np.where(valid, np.log(s) - np.log(prev), np.nan), index=s.index
-            )
-            lchg = lchg.interpolate(method="linear", limit_direction="both").fillna(0.0)
-            lchg_df[f"{col}_lchg"] = lchg
-
-    if "lag" in transforms and not base_levels.empty:
-        for lag in lags:
-            lagged = base_levels.shift(lag)
-            lagged.columns = [f"{col}_lag{lag}" for col in base_levels.columns]
-            transformed_frames.append(lagged)
-            column_order.extend(lagged.columns.tolist())
-
-    if "lchg" in transforms and lchg_df is not None:
-        transformed_frames.append(lchg_df)
-        column_order.extend(lchg_df.columns.tolist())
-
-    if "lag_lchg" in transforms and lchg_df is not None:
-        for lag in lags:
-            lagged_lchg = lchg_df.shift(lag)
-            lagged_lchg.columns = [f"{col}_lag{lag}" for col in lchg_df.columns]
-            transformed_frames.append(lagged_lchg)
-            column_order.extend(lagged_lchg.columns.tolist())
-
-    if transformed_frames:
-        feature_df = pd.concat(transformed_frames, axis=1)
-        feature_df = feature_df.reindex(columns=column_order)
-    else:
-        feature_df = pd.DataFrame(index=df.index)
-
-    # Ensure numeric array aligned to requested years
-    if feature_df.shape[1] == 0:
-        feature_array = np.zeros((len(years_list), 0), dtype=float)
-    else:
-        feature_df = feature_df.astype(float)
-        col_means = np.nanmean(feature_df.values, axis=0)
-        col_means = np.nan_to_num(col_means, nan=0.0)
-
-        rows = []
-        zero_row = np.zeros(feature_df.shape[1], dtype=float)
-        for year in years_list:
-            if year in feature_df.index:
-                row = feature_df.loc[year].to_numpy(dtype=float)
-                if np.isnan(row).any():
-                    row = np.where(np.isnan(row), col_means, row)
-            else:
-                row = zero_row
-            rows.append(row)
-        feature_array = np.vstack(rows)
-
-    if use_clients and clients_lookup:
-        feature_array = add_annual_client_feature(
-            feature_array, years_list, clients_lookup
-        )
-    
-    if use_pf:
-        feature_array = add_yearly_feature(
-            feature_array, years_list, df_monthly, feature="puissance facturée", agg_method="sum"
-        )
-
-    return feature_array if feature_array.size else None
 
 
 def strategy1_ultra_strict_loocv(
@@ -1312,15 +1161,13 @@ def strategy4_ultra_strict_loocv(
     df_monthly,
     feature_blocks,
     monthly_clients_lookup=None,
+    client_pattern_weights=None,
     use_monthly_clients_options=[False],
     use_pf_options = [False],
-    client_pattern_weights=None,
     growth_feature_transforms: Iterable[Iterable[str]] = (("level",),),
     growth_feature_lags: Iterable[Iterable[int]] = ((1,),),
     training_windows=[10],
 ):
-    GROWTH_MODEL_L2: float = 10.0
-    GROWTH_MODEL_RHO_BOUNDS: Tuple[float, float] = (0.0, 1)
 
     results = []
     n_years = len(years)
@@ -1371,8 +1218,6 @@ def strategy4_ultra_strict_loocv(
         actuals = []
         valid_years_list = []
         growth_model = None
-        growth_model_include_exog = False
-        growth_model_feature_dim = 0
 
         # LOOCV
         for test_idx in range(2, n_years):
@@ -1396,7 +1241,7 @@ def strategy4_ultra_strict_loocv(
                 fb_features,
                 df_features,
                 clients_lookup=clients_lookup if use_clients else None,
-                use_clients = use_clients,
+                use_clients = bool(use_clients and clients_lookup),
                 df_monthly=df_monthly,
                 use_pf=use_pf,
                 transforms=transforms_option,
@@ -1426,7 +1271,8 @@ def strategy4_ultra_strict_loocv(
                 fb_features,
                 df_features,
                 clients_lookup=clients_lookup if use_clients else None,
-                use_clients=False,  # bool(use_clients and clients_lookup),
+                use_clients=bool(use_clients and clients_lookup),
+                use_pf=use_pf,
                 transforms=transforms_option,
                 lags=lags_option,
             )
@@ -1439,29 +1285,19 @@ def strategy4_ultra_strict_loocv(
             else:
                 test_features_array = None
 
-            needs_refit = (
-                True
-                or growth_model is None
-                or include_exog != growth_model_include_exog
-                or feature_dim != growth_model_feature_dim
-            )
 
-            if needs_refit:
-                growth_model = MeanRevertingGrowthModel(
-                    include_ar=True,
-                    include_exog=include_exog,
-                    l2_penalty=GROWTH_MODEL_L2,
-                    rho_bounds=GROWTH_MODEL_RHO_BOUNDS,
+
+            growth_model = MeanRevertingGrowthModel(
+                include_ar=True,
+                include_exog=include_exog,
+            )
+            try:
+                growth_model.fit(
+                    y = train_annual_sorted,
+                    X = train_features_array if include_exog else None,
                 )
-                try:
-                    growth_model.fit(
-                        train_annual_sorted,
-                        train_features_array if include_exog else None,
-                    )
-                    growth_model_include_exog = include_exog
-                    growth_model_feature_dim = feature_dim
-                except ValueError:
-                    growth_model = None
+            except ValueError:
+                growth_model = None
 
             if growth_model is None:
                 continue

@@ -5,7 +5,8 @@ import numpy as np
 from datetime import datetime
 import pandas as pd
 import plotly.express as px
-from typing import Union, Callable
+from typing import Union, Callable, Iterable, Mapping
+
 
 def custom_mean_absolute_percentage_error(y_true, y_pred, ignore_zeros=True):
     y_true = np.array(y_true)
@@ -191,6 +192,15 @@ def calculate_all_metrics(actual_monthly, pred_monthly, actual_annual, pred_annu
     }
     return out
 
+def calculate_all_annual_metrics(actual_annual, pred_annual):
+    """Calculate comprehensive metrics safely, even with NaNs"""
+    out = {
+        'annual_mae': safe_metric(mean_absolute_error, actual_annual, pred_annual),
+        'annual_mape': safe_metric(custom_mean_absolute_percentage_error, actual_annual, pred_annual) * 100,
+        'annual_r2': safe_metric(r2_score, actual_annual, pred_annual),
+    }
+    return out
+
 def select_best_model(results, r2_threshold):
     """Select best model: lowest MAE with R² > threshold"""
     valid_results = [r for r in results if r['annual_r2'] >= r2_threshold]
@@ -286,6 +296,28 @@ def get_move_out_year(df_c):
 
     return move_out_year
 
+def add_annual_client_feature(
+    X: np.ndarray, years: Iterable[int], series_lookup: Mapping[int, np.ndarray]
+) -> np.ndarray:
+    """
+    Append the annual sum of monthly client predictions per year.
+    """
+    if not series_lookup:
+        return X
+
+    annual_values = []
+    for year in years:
+        series = series_lookup.get(int(year))
+        if series is None:
+            annual_values.append([0.0])
+        else:
+            annual_values.append([float(np.sum(series))])
+
+    if not annual_values:
+        return X
+
+    annual_array = np.array(annual_values, dtype=float)
+    return np.hstack([X, annual_array])
 
 
 def plot_time_evolution(

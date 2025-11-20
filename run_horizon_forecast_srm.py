@@ -2,13 +2,12 @@
 # run_horizon_forecast_srm.py (Clean + Correct)
 # ─────────────────────────────────────────────────────────────
 
-from growth_rate_model import MeanRevertingGrowthModel
+from growth_rate_model import MeanRevertingGrowthModelARP, MeanRevertingGrowthModel, PCAMeanRevertingGrowthModel, RawMeanRevertingGrowthModel, LocalInterpolationForecastModel
 from forecast_strategies import (
     build_growth_rate_features,
-    strategy4_ultra_strict_loocv,
     create_monthly_matrix,
 )
-from onee.utils import select_best_model
+from onee.utils import select_best_model, calculate_all_annual_metrics
 from run_forecast_srm import (
     clean_name,
     get_queries_for,
@@ -23,112 +22,313 @@ import pickle
 from pathlib import Path
 import warnings
 
+from pydantic import BaseModel, Field
+from typing import List, Tuple, Dict, Optional
+from itertools import product
+
 warnings.filterwarnings("ignore")
 
 
 # ─────────────────────────────────────────────────────────────
 # CONFIGURATION OBJECT
 # ─────────────────────────────────────────────────────────────
+MODEL_REGISTRY = {
+    "MeanRevertingGrowthModel": MeanRevertingGrowthModel,
+    "MeanRevertingGrowthModelARP": MeanRevertingGrowthModelARP,
+    "PCAMeanRevertingGrowthModel": PCAMeanRevertingGrowthModel,
+    "RawMeanRevertingGrowthModel": RawMeanRevertingGrowthModel,
+    "LocalInterpolationForecastModel": LocalInterpolationForecastModel,
+}
 
-class ForecastConfig:
-    def __init__(
-        self,
-        project_root,
-        variable="consommation_kwh",
-        unit="Kwh",
-        horizon=5,
-        growth_model_l2=10.0,
-        rho_bounds=(0.0, 1.0),
-        feature_transforms=(("lag_lchg",),),#(("lag_lchg",), ("lchg",)),
-        feature_lags=((1,),),#((1,), (1, 2)),
-        feature_blocks=None,
-        use_pf_options=[False],
-        training_windows=[None],
-        r2_threshold=0.6,
-        client_pattern_weights = [0.3, 0.5, 0.8],
-        use_client_options=[False]
-    ):
-        self.project_root = Path(project_root)
-        self.variable = variable
-        self.unit = unit
-        self.horizon = horizon
-        self.growth_model_l2 = growth_model_l2
-        self.rho_bounds = rho_bounds
-        self.feature_transforms = feature_transforms
-        self.feature_lags = feature_lags
-        self.feature_blocks = feature_blocks or {
-            "none": [],
-            "gdp_only": ["pib_mdh"],
-            "sectoral_only": ["gdp_primaire", "gdp_secondaire", "gdp_tertiaire"],
-            "gdp_sectoral": ["pib_mdh", "gdp_primaire", "gdp_secondaire", "gdp_tertiaire"],
-        }
-        self.use_pf_options = use_pf_options
-        self.training_windows = training_windows
-        self.r2_threshold = r2_threshold
-        self.client_pattern_weights = client_pattern_weights
-        self.use_client_options = use_client_options
-
-
-# ─────────────────────────────────────────────────────────────
-# MODEL FITTING + FORECAST FUNCTIONS
-# ─────────────────────────────────────────────────────────────
-
-def fit_growth_model_from_history(annual_series, features, config: ForecastConfig):
-    model = MeanRevertingGrowthModel(
-        include_ar=True,
-        include_exog=features is not None and features.shape[1] > 0,
-        l2_penalty=config.growth_model_l2,
-        rho_bounds=config.rho_bounds,
-        use_asymmetric_loss=False,
-        include_ar_squared=True,
+class GeneralParams(BaseModel):
+    project_root: Path
+    exp_name: str
+    horizon: int
+    variable: str = "consommation_kwh"
+    unit: str = "Kwh"
+    r2_threshold: float = 0.6
+    model_classes: List[str] = Field(
+        default_factory=lambda: ["MeanRevertingGrowthModel", "MeanRevertingGrowthModelARP"] # "MeanRevertingGrowthModelARP", "MeanRevertingGrowthModel", "PCAMeanRevertingGrowthModel", "RawMeanRevertingGrowthModel", "LocalInterpolationForecastModel"
     )
-    model.fit(annual_series, features)
-    return model
 
 
-def forecast_horizon(
-    growth_model,
+class FeatureBuildingGrid(BaseModel):
+    transforms: Tuple[Tuple[str, ...], ...] = (
+        # ("lchg",),
+        # ("level",),
+        ("lchg", "level"),
+        # ("lag_lchg",),
+    )
+    lags: Tuple[Tuple[int, ...], ...] = ((1),)
+    feature_block: List[List[str]] = Field(
+        default_factory=lambda: [
+            [],
+            ["pib_mdh"],
+            ["gdp_primaire", "gdp_secondaire", "gdp_tertiaire"],
+            ["pib_mdh", "gdp_primaire", "gdp_secondaire", "gdp_tertiaire"],
+        ]
+    )
+    use_pf: List[bool] = Field(default_factory=lambda: [False])
+    use_clients: List[bool] = Field(default_factory=lambda: [True, False])
+    training_window: List[Optional[int]] = Field(default_factory=lambda: [None, 3, 5])
+
+
+class ModelHyperparameterGrid(BaseModel):
+    
+    # Shared parameters across both models
+    include_ar: List[bool] = Field(default_factory=lambda: [True])
+    include_exog: List[bool] = Field(default_factory=lambda: [True])
+    include_ar_squared: List[bool] = Field(default_factory=lambda: [True, False])
+
+    # AR(p)-only parameter (ignored by basic model, warning issued)
+    ar_lags: List[int] = Field(default_factory=lambda: [3, 5])
+
+    # Regularization
+    l2_penalty: List[float] = Field(default_factory=lambda: [0.0, 10])
+    # beta_bounds: List[Tuple[float, float]] = Field(
+    #     default_factory=lambda: [(-1.0, 1.0)]
+    # )
+
+    rho_bounds: List[Tuple[float, float]] = Field(
+        default_factory=lambda: [(0.00, 1.0)]
+    )
+
+    # Asymmetric loss
+    use_asymmetric_loss: List[bool] = Field(
+        default_factory=lambda: [False, True]
+    )
+    # underestimation_penalty: List[float] = Field(
+    #     default_factory=lambda: [1.0, 2.0, 3.0]
+    # )
+
+    # PCA-based model
+    n_pcs: List[int] = Field(default_factory=lambda: [2, 3])
+    pca_lambda: List[float] = Field(default_factory=lambda: [0.3, 0.9])
+
+    # Local interpolation model params
+    window_size: List[int] = Field(default_factory=lambda: [3, 5, 7])
+    weighted: List[bool] = Field(default_factory=lambda: [True])
+    weight_decay: List[float] = Field(default_factory=lambda: [0.5, 0.9])
+
+
+
+class ForecastConfig(BaseModel):
+    general_params: GeneralParams
+    feature_building_grid: FeatureBuildingGrid = FeatureBuildingGrid()
+    model_hyperparameter_grid: ModelHyperparameterGrid = ModelHyperparameterGrid()
+
+ 
+
+
+def run_annual_loocv_grid_search(
+    monthly_matrix,
+    years,
     df_features,
-    start_year,
-    fb_features,
-    monthly_clients_lookup,
-    use_clients,
     df_monthly,
-    use_pf,
-    feature_transforms,
-    feature_lags
+    monthly_clients_lookup,
+    GrowthModelClass,
+    feature_building_grid,
+    model_hyperparameter_grid,
+    metric_fn,     # A function to compute metrics (actual_annual, pred_annual) → dict
 ):
-    """Forecast multiple years ahead using the provided growth model.
-
-    This function accepts all parameters required by `build_growth_rate_features`
-    so it can construct exogenous features for each forecast year.
     """
-    preds = []
-    for h in range(1, config.horizon + 1):
-        target_year = start_year + h
-        x_next = build_growth_rate_features(
-            years=[target_year],
-            feature_block=fb_features,
-            df_features=df_features,
-            clients_lookup=monthly_clients_lookup,
-            use_clients=use_clients,
-            df_monthly=df_monthly,
-            use_pf=use_pf,
-            transforms=feature_transforms,
-            lags=feature_lags,
-        )
-        x_next = np.asarray(x_next, dtype=float) if x_next is not None else None
-        y_pred = growth_model.predict(x_next[0] if x_next is not None else None)
-        preds.append((target_year, y_pred))
+    Perform annual-only LOOCV grid search over model and feature-building configurations.
 
-        predicted_growth_rate = np.log(y_pred) - np.log(growth_model.last_y)
-        growth_model.last_growth_rate = predicted_growth_rate
-        growth_model.last_y = y_pred
+    Returns:
+        A list of dictionaries, each containing:
+            - model_config
+            - feature_config
+            - pred_annual_values
+            - actual_annual_values
+            - valid_years
+            - flat metrics
+    """
 
-    return preds
+    n_years = len(years)
+    annual_consumption = monthly_matrix.sum(axis=1)
+
+    # -------------------------------------------------------------------------
+    # Extract grid dicts from pydantic objects
+    # -------------------------------------------------------------------------
+    fg = feature_building_grid.dict()
+    mg = model_hyperparameter_grid.dict()
+
+    mg = {
+        k: v for k, v in mg.items() 
+        if k in GrowthModelClass.SUPPORTED_HYPERPARAMS
+    }
+
+    if GrowthModelClass.__name__ == "LocalInterpolationForecastModel":
+        fg = {"feature_block": [[]], "training_window": [None]}
+
+    # print(mg)
+    # print(fg)
+    # -------------------------------------------------------------------------
+    # training_window MUST be handled separately
+    # -------------------------------------------------------------------------
+    if "training_window" not in fg:
+        print("⚠️ feature_building_grid does not contain 'training_window'.")
+        training_windows = [None]
+    else:
+        training_windows = fg.pop("training_window")
+
+    # All remaining fields in fg are hyperparameters for build_growth_rate_features
+    feature_param_names = list(fg.keys())
+    feature_param_values = list(fg.values())
+
+    # All fields in mg are hyperparameters for GrowthModelClass
+    model_param_names = list(mg.keys())
+    model_param_values = list(mg.values())
+
+    results = []
+
+    # -------------------------------------------------------------------------
+    # GRID SEARCH
+    # -------------------------------------------------------------------------
+    for training_window in training_windows:
+        # Loop over feature-building parameters (Cartesian product)
+        for feature_values in product(*feature_param_values):
+            # Build the feature configuration dict for this iteration
+            feature_config_dict = dict(zip(feature_param_names, feature_values))
+            feature_config_dict["training_window"] = training_window
+
+            # Loop over model hyperparameters (Cartesian product)
+            for model_values in product(*model_param_values):
+
+                model_config_dict = dict(zip(model_param_names, model_values))
+                # Storage for LOOCV
+                pred_annual_list = []
+                actual_annual_list = []
+                valid_years_list = []
+
+                # -------------------------------------------------------------
+                # LOOCV — predict year t using train < t
+                # -------------------------------------------------------------
+                for test_idx in range(2, n_years):
+
+                    # Determine training range
+                    if training_window is not None:
+                        start_idx = max(0, test_idx - training_window)
+                    else:
+                        start_idx = 0
+
+                    train_indices = [
+                        i for i in range(n_years)
+                        if (i < test_idx and i >= start_idx)
+                    ]
+
+                    # Need at least 3 annual observations for stable fitting
+                    if len(train_indices) < 3:
+                        continue
+
+                    train_years = [years[i] for i in train_indices]
+                    train_annual = annual_consumption[train_indices]
+
+                    # ---------------------------------------------------------
+                    # Build training features
+                    # ---------------------------------------------------------
+                    train_features = build_growth_rate_features(
+                        train_years,
+                        df_features=df_features,
+                        df_monthly=df_monthly,
+                        clients_lookup=monthly_clients_lookup,
+                        **feature_config_dict
+                    )
+                    # Convert to numpy
+                    if train_features is not None:
+                        train_features_array = np.asarray(train_features, float)
+                    else:
+                        train_features_array = None
+
+                    # Sort by year for safety
+                    train_years_array = np.asarray(train_years, int)
+                    sort_idx = np.argsort(train_years_array)
+                    train_years_array = train_years_array[sort_idx]
+                    train_annual_sorted = np.asarray(train_annual, float)[sort_idx]
+                    train_monthly_sorted = monthly_matrix[train_indices][sort_idx]
+
+                    if train_features_array is not None:
+                        train_features_array = train_features_array[sort_idx]
+
+                    # ---------------------------------------------------------
+                    # Train model
+                    # ---------------------------------------------------------
+                    try:
+                        model = GrowthModelClass(**model_config_dict)
+                        model.fit(y = train_annual_sorted, X = train_features_array, years = train_years, monthly_matrix=train_monthly_sorted)
+                    except Exception:
+                        continue  # skip this fold if model fails
+
+                    # ---------------------------------------------------------
+                    # Build test features
+                    # ---------------------------------------------------------
+                    test_year = int(years[test_idx])
+                    test_features = build_growth_rate_features(
+                        [test_year],
+                        df_features=df_features,
+                        df_monthly=df_monthly,
+                        clients_lookup=monthly_clients_lookup,
+                        **feature_config_dict
+                    )
+
+                    if test_features is not None:
+                        test_features_array = np.asarray(test_features, float)[0]
+                    else:
+                        test_features_array = None
+
+                    # ---------------------------------------------------------
+                    # Predict annual
+                    # ---------------------------------------------------------
+                    try:
+                        pred_annual = model.predict(test_features_array)
+                    except Exception:
+                        continue
+
+                    actual_annual = annual_consumption[test_idx]
+
+                    pred_annual_list.append(pred_annual)
+                    actual_annual_list.append(actual_annual)
+                    valid_years_list.append(test_year)
+
+                # End LOOCV loop ------------------------------------------------
+
+                # Skip if no valid folds
+                if len(pred_annual_list) == 0:
+                    continue
+
+                pred_arr = np.array(pred_annual_list)
+                act_arr = np.array(actual_annual_list)
+                valid_years_arr = np.array(valid_years_list)
+
+                # -------------------------------------------------------------
+                # Compute metrics
+                # -------------------------------------------------------------
+                metrics = metric_fn(
+                    actual_annual=act_arr,
+                    pred_annual=pred_arr,
+                )
+
+                # -------------------------------------------------------------
+                # Store result
+                # -------------------------------------------------------------
+                results.append(
+                    {   
+                        "model_name": GrowthModelClass.__name__,
+                        "model_class": GrowthModelClass,   
+                        "model_config": model.get_params(),
+                        "feature_config": feature_config_dict,
+                        "pred_annual_values": pred_arr,
+                        "actual_annual_values": act_arr,
+                        "valid_years": valid_years_arr,
+                        **metrics,
+                    }
+                )
+
+    return results
 
 
-def strategy4_long_horizon_forecast(
+
+def run_long_horizon_forecast(
     monthly_matrix,
     years,
     df_features,
@@ -137,69 +337,69 @@ def strategy4_long_horizon_forecast(
     monthly_clients_lookup=None,
 ):
     # Step 1. Run LOOCV search across all param combinations from ForecastConfig
-    base_results = strategy4_ultra_strict_loocv(
-        monthly_matrix=monthly_matrix,
-        years=years,
-        df_features=df_features,
-        df_monthly=df_monthly,
-        feature_blocks=config.feature_blocks,
-        monthly_clients_lookup=monthly_clients_lookup,
-        use_monthly_clients_options=config.use_client_options if monthly_clients_lookup else [False],
-        use_pf_options=config.use_pf_options,
-        client_pattern_weights=config.client_pattern_weights,
-        growth_feature_transforms=config.feature_transforms,
-        growth_feature_lags=config.feature_lags,
-        training_windows=config.training_windows,
+    all_results = []
+
+    for model_name in config.general_params.model_classes:
+        model_class = MODEL_REGISTRY[model_name]
+        results = run_annual_loocv_grid_search(
+            monthly_matrix=monthly_matrix,
+            years=years,
+            df_features=df_features,
+            df_monthly=df_monthly,
+            monthly_clients_lookup=monthly_clients_lookup,
+            GrowthModelClass=model_class,
+            feature_building_grid=config.feature_building_grid,
+            model_hyperparameter_grid=config.model_hyperparameter_grid,
+            metric_fn=calculate_all_annual_metrics,
+        )
+        all_results+=results
+
+    best_result = select_best_model(all_results, r2_threshold=config.general_params.r2_threshold)
+
+    print(
+        f"\n🏆 Best model: {best_result['model_name']} | R²={best_result.get('annual_r2', 0):.3f}"
     )
+    training_window = best_result["feature_config"].get("training_window", None)
 
-    best_result = select_best_model(base_results, r2_threshold=config.r2_threshold)
-    print(f"\n🏆 Best model: {best_result['feature_block']} | R²={best_result.get('r2_annual', 0):.3f}")
+    # Determine which years to use
+    n_years = len(years)
 
-    # Step 2. Extract best-found parameters from LOOCV
-    best_transforms = best_result.get("growth_feature_transforms", ("lag_lchg",))
-    best_lags = best_result.get("growth_feature_lags", (1,))
-    best_use_pf = best_result.get("use_pf", False)
-    best_use_clients = best_result.get("use_monthly_clients", False)
-    best_fb_name = best_result["feature_block"]
+    if training_window is None:
+        # Use all years
+        train_start = 0
+    else:
+        # Use only the last N years (handle short dataset edge case)
+        train_start = max(0, n_years - training_window)
 
-    # Step 3. Build training features with best parameters
+    train_years = years[train_start:]
+    monthly_matrix = monthly_matrix[train_start:]
+    train_annual = monthly_matrix.sum(axis=1)
+
     growth_features = build_growth_rate_features(
-        years=years,
-        feature_block=config.feature_blocks[best_fb_name],
+        years=train_years,
         df_features=df_features,
         clients_lookup=monthly_clients_lookup,
-        use_clients=best_use_clients,
         df_monthly=df_monthly,
-        use_pf=best_use_pf,
-        transforms=best_transforms,
-        lags=best_lags,
+        **best_result["feature_config"],   # includes feature_blocks, transforms, lags, etc.
+    )
+    BestModelClass = best_result["model_class"]
+
+    growth_model = BestModelClass(
+        **best_result["model_config"]
     )
 
-    # Step 4. Fit final model with chosen params
-    growth_model = fit_growth_model_from_history(
-        annual_series=monthly_matrix.sum(axis=1),
-        features=growth_features,
-        config=config,
-    )
-
-    print("ρ (rho):", growth_model.rho)
-    print("μ (mu):", growth_model.mu)
+    growth_model.fit(y = train_annual, X = growth_features, years = train_years, monthly_matrix=monthly_matrix)
 
     # Step 5. Forecast horizon years using best params
     last_year = int(max(years))
-    config.feature_transforms = best_transforms
-    config.feature_lags = best_lags
-    horizon_preds = forecast_horizon(
-        growth_model=growth_model,
+
+    horizon_preds = growth_model.forecast_horizon(
         df_features=df_features,
         start_year=last_year,
-        fb_features=config.feature_blocks[best_fb_name],
+        horizon=config.general_params.horizon,
         monthly_clients_lookup=monthly_clients_lookup,
-        use_clients=best_use_clients,
         df_monthly=df_monthly,
-        use_pf=best_use_pf,
-        feature_transforms=best_transforms,
-        feature_lags=best_lags,
+        feature_config=best_result["feature_config"]
     )
 
     # Step 6. Distribute annual forecasts to months
@@ -208,24 +408,11 @@ def strategy4_long_horizon_forecast(
     future_monthly = [val * mean_curve_norm for _, val in horizon_preds]
 
     return {
-        "base_result": best_result,
         "horizon_predictions": horizon_preds,
         "monthly_forecasts": future_monthly,
         "run_parameters": {
-            "feature_block_name": best_fb_name,
-            "feature_block": config.feature_blocks[best_fb_name],
-            "use_pf": bool(best_use_pf),
-            "use_clients": bool(best_use_clients),
-            "feature_transforms": best_transforms,
-            "feature_lags": best_lags,
-            "growth_model": {
-                "rho": getattr(growth_model, "rho", None),
-                "mu": getattr(growth_model, "mu", None),
-                "beta": getattr(growth_model, "beta", None),
-                "gamma": getattr(growth_model, "gamma", None),
-            },
-            "use_squared": getattr(growth_model, "include_ar_squared", False),
-            "use_asymmetric_loss": getattr(growth_model, "use_asymmetric_loss", False),
+            "feature_config": best_result["feature_config"],
+            "growth_model": {"model_name":best_result['model_name'],**best_result["model_config"]},
         },
     }
 
@@ -236,29 +423,46 @@ def strategy4_long_horizon_forecast(
 
 if __name__ == "__main__":
     config = ForecastConfig(
-        project_root=Path(__file__).resolve().parents[0],
-        horizon=5,
+        general_params=GeneralParams(
+            project_root=Path(__file__).resolve().parents[0],
+            exp_name="srm_arp",
+            horizon=5
+        )
     )
 
     REGIONS = [
-        "Casablanca-Settat",
+        "Béni Mellal-Khénifra", "Casablanca-Settat", "Drâa-Tafilalet", "Fès-Meknès",
+        "Laâyoune-Sakia El Hamra",
+        "Marrakech-Safi",
+        "Oriental",
+        "Rabat-Salé-Kénitra",
+        "Tanger-Tétouan-Al Hoceïma",
+        "Souss-Massa",
     ]
+
+    REGIONS = ["Casablanca-Settat"]
     # Choose which analysis parts (levels) to run
     # 1: Activities, 2: Aggregated BT, 3: Aggregated MT, 4: Total Regional,
     # 5: Individual Distributors, 6: All Distributors, 7: SRM (Regional+Dist)
-    RUN_LEVELS = {1, 4}
+    RUN_LEVELS = {4}
     forecast_types = {
         # "forward": (2007, 2023),
-        "backtest": (2007, 2018),
+        "backtest": (2007, 2020),
     }
 
     for TARGET_REGION in REGIONS:
         print(f"\n{'='*80}\n🌍 REGION: {TARGET_REGION}\n{'='*80}")
 
-        db_regional = sqlite3.connect(config.project_root / "data/ONEE_Regional_COMPLETE_2007_2023.db")
-        db_dist = sqlite3.connect(config.project_root / "data/ONEE_Distributeurs_consumption.db")
+        db_regional = sqlite3.connect(
+            config.general_params.project_root / "data/ONEE_Regional_COMPLETE_2007_2023.db"
+        )
+        db_dist = sqlite3.connect(
+            config.general_params.project_root / "data/ONEE_Distributeurs_consumption.db"
+        )
 
-        q_regional_mt, q_regional_bt, q_dist, q_features, var_cols = get_queries_for(config.variable, TARGET_REGION)
+        q_regional_mt, q_regional_bt, q_dist, q_features, var_cols = get_queries_for(
+            config.general_params.variable, TARGET_REGION
+        )
         df_regional_mt = pd.read_sql_query(q_regional_mt, db_regional)
         df_regional_bt = pd.read_sql_query(q_regional_bt, db_regional)
         df_features = pd.read_sql_query(q_features, db_regional)
@@ -267,16 +471,23 @@ if __name__ == "__main__":
         db_regional.close()
         db_dist.close()
 
-        df_regional_mt["activite"] = df_regional_mt["activite"].replace("Administratif", "Administratif_mt")
+        df_regional_mt["activite"] = df_regional_mt["activite"].replace(
+            "Administratif", "Administratif_mt"
+        )
         df_regional = pd.concat([df_regional_bt, df_regional_mt])
 
         reg_var_col = var_cols["regional"]
-        require_columns(df_regional, ["annee", "mois", "activite", reg_var_col], "df_regional")
+        require_columns(
+
+            df_regional, ["annee", "mois", "activite", reg_var_col], "df_regional"
+        )
         df_regional[reg_var_col] = df_regional[reg_var_col].fillna(0)
 
         if df_dist is not None:
             dist_var_col = var_cols["distributor"]
-            require_columns(df_dist, ["annee", "mois", "distributeur", dist_var_col], "df_dist")
+            require_columns(
+                df_dist, ["annee", "mois", "distributeur", dist_var_col], "df_dist"
+            )
             df_dist[dist_var_col] = df_dist[dist_var_col].fillna(0)
 
         # Lookup of previously computed monthly client predictions
@@ -284,11 +495,19 @@ if __name__ == "__main__":
         all_results = []
 
         activities = sorted(df_regional["activite"].unique())
-        mt_activities = ["Administratif_mt", "Agricole", "Industriel", "Résidentiel", "Tertiaire"]
+        mt_activities = [
+            "Administratif_mt",
+            "Agricole",
+            "Industriel",
+            "Résidentiel",
+            "Tertiaire",
+        ]
         bt_activities = [a for a in activities if a not in mt_activities]
 
         for mode, (train_start, train_end) in forecast_types.items():
-            print(f"\n🧭 MODE: {mode.upper()} — training {train_start}→{train_end}, horizon={config.horizon}")
+            print(
+                f"\n🧭 MODE: {mode.upper()} — training {train_start}→{train_end}, horizon={config.general_params.horizon}"
+            )
 
             # ────────────────────────────────────────────────────────────────
             # LEVEL 1: INDIVIDUAL ACTIVITIES
@@ -296,35 +515,41 @@ if __name__ == "__main__":
             if 1 in RUN_LEVELS:
                 print(f"\n{'#'*60}\nLEVEL 1: INDIVIDUAL ACTIVITIES\n{'#'*60}")
                 for activity in activities:
+                    entity_name = f"Activity_{activity}"
+                    print(f"\n{'#'*30}\n{entity_name}\n{'#'*30}")
                     df_activity = (
-                        df_regional[df_regional["activite"] == activity][["annee", "mois", reg_var_col]]
+                        df_regional[df_regional["activite"] == activity][
+                            ["annee", "mois", reg_var_col]
+                        ]
                         .copy()
-                        .rename(columns={reg_var_col: config.variable})
+                        .rename(columns={reg_var_col: config.general_params.variable})
                     )
                     df_train = df_activity[df_activity["annee"] <= train_end]
-                    monthly_matrix = create_monthly_matrix(df_train, value_col=config.variable)
+                    monthly_matrix = create_monthly_matrix(
+                        df_train, value_col=config.general_params.variable
+                    )
                     years = np.sort(df_train["annee"].unique())
 
-                    res = strategy4_long_horizon_forecast(
+                    res = run_long_horizon_forecast(
                         monthly_matrix=monthly_matrix,
                         years=years,
                         df_features=df_features,
                         df_monthly=df_activity,
                         config=config,
-                        monthly_clients_lookup=client_predictions_lookup.get(f"Activity_{activity}", {}),
+                        monthly_clients_lookup=client_predictions_lookup.get(
+                            f"Activity_{activity}", {}
+                        ),
                     )
 
-                    entity_name = f"Activity_{activity}"
                     # store monthly forecasts for later aggregation
                     if "monthly_forecasts" in res:
                         client_predictions_lookup[entity_name] = {
                             y: np.array(m)
                             for y, m in zip(
                                 [y for y, _ in res["horizon_predictions"]],
-                                res["monthly_forecasts"]
+                                res["monthly_forecasts"],
                             )
                         }
-                    
 
                     forecast_years = [y for y, _ in res["horizon_predictions"]]
                     pred_annual = [float(v) for _, v in res["horizon_predictions"]]
@@ -336,23 +561,26 @@ if __name__ == "__main__":
                         mask = df_activity["annee"] == y
                         if not df_activity.loc[mask, reg_var_col].empty:
                             actual = df_activity.loc[mask, reg_var_col].sum()
-                            percent_error = (v - actual)/actual * 100 if actual != 0 else None
-                    
+                            percent_error = (
+                                (v - actual) / actual * 100 if actual != 0 else None
+                            )
+
                         actuals.append(actual)
                         percent_errors.append(percent_error)
 
-
-                    all_results.append({
-                        "region": TARGET_REGION,
-                        "mode": mode,
-                        "level": entity_name,
-                        "forecast_years":forecast_years,
-                        "pred_annual": pred_annual,
-                        "pred_monthly": res["monthly_forecasts"],
-                        "run_parameters": res.get("run_parameters", {}),
-                        "actuals":actuals,
-                        "percent_errors":percent_errors
-                    })
+                    all_results.append(
+                        {
+                            "region": TARGET_REGION,
+                            "mode": mode,
+                            "level": entity_name,
+                            "forecast_years": forecast_years,
+                            "pred_annual": pred_annual,
+                            "pred_monthly": res["monthly_forecasts"],
+                            "run_parameters": res.get("run_parameters", {}),
+                            "actuals": actuals,
+                            "percent_errors": percent_errors,
+                        }
+                    )
 
             # ────────────────────────────────────────────────────────────────
             # LEVEL 2: AGGREGATED BT
@@ -365,7 +593,7 @@ if __name__ == "__main__":
                         df_bt.groupby(["annee", "mois"])
                         .agg({reg_var_col: "sum"})
                         .reset_index()
-                        .rename(columns={reg_var_col: config.variable})
+                        .rename(columns={reg_var_col: config.general_params.variable})
                     )
 
                     # Combine predictions from Level 1
@@ -376,16 +604,20 @@ if __name__ == "__main__":
                     )
 
                     df_train = df_bt_agg[df_bt_agg["annee"] <= train_end]
-                    monthly_matrix = create_monthly_matrix(df_train, value_col=config.variable)
+                    monthly_matrix = create_monthly_matrix(
+                        df_train, value_col=config.general_params.variable
+                    )
                     years = np.sort(df_train["annee"].unique())
 
-                    res = strategy4_long_horizon_forecast(
+                    res = run_long_horizon_forecast(
                         monthly_matrix=monthly_matrix,
                         years=years,
                         df_features=df_features,
                         df_monthly=df_bt_agg,
                         config=config,
-                        monthly_clients_lookup=client_predictions_lookup.get("Aggregated_BT", {}),
+                        monthly_clients_lookup=client_predictions_lookup.get(
+                            "Aggregated_BT", {}
+                        ),
                     )
 
                     # Update aggregated lookup
@@ -394,19 +626,40 @@ if __name__ == "__main__":
                             y: np.array(m)
                             for y, m in zip(
                                 [y for y, _ in res["horizon_predictions"]],
-                                res["monthly_forecasts"]
+                                res["monthly_forecasts"],
                             )
                         }
 
-                    all_results.append({
-                        "region": TARGET_REGION,
-                        "mode": mode,
-                        "level": "Aggregated_BT",
-                        "forecast_years": [y for y, _ in res["horizon_predictions"]],
-                        "pred_annual": [float(v) for _, v in res["horizon_predictions"]],
-                        "pred_monthly": res["monthly_forecasts"],
-                        "run_parameters": res.get("run_parameters", {}),
-                    })
+                    forecast_years = [y for y, _ in res["horizon_predictions"]]
+                    pred_annual = [float(v) for _, v in res["horizon_predictions"]]
+                    actuals = []
+                    percent_errors = []
+                    for y, v in zip(forecast_years, pred_annual):
+                        actual = None
+                        percent_error = None
+                        mask = df_bt_agg["annee"] == y
+                        if not df_bt_agg.loc[mask, config.general_params.variable].empty:
+                            actual = df_bt_agg.loc[mask, config.general_params.variable].sum()
+                            percent_error = (
+                                (v - actual) / actual * 100 if actual != 0 else None
+                            )
+
+                        actuals.append(actual)
+                        percent_errors.append(percent_error)
+
+                    all_results.append(
+                        {
+                            "region": TARGET_REGION,
+                            "mode": mode,
+                            "level": "Aggregated_BT",
+                            "forecast_years": forecast_years,
+                            "pred_annual": pred_annual,
+                            "pred_monthly": res["monthly_forecasts"],
+                            "run_parameters": res.get("run_parameters", {}),
+                            "actuals": actuals,
+                            "percent_errors": percent_errors,
+                        }
+                    )
 
             # ────────────────────────────────────────────────────────────────
             # LEVEL 3: AGGREGATED MT
@@ -419,7 +672,7 @@ if __name__ == "__main__":
                         df_mt.groupby(["annee", "mois"])
                         .agg({reg_var_col: "sum"})
                         .reset_index()
-                        .rename(columns={reg_var_col: config.variable})
+                        .rename(columns={reg_var_col: config.general_params.variable})
                     )
 
                     aggregate_predictions(
@@ -429,16 +682,20 @@ if __name__ == "__main__":
                     )
 
                     df_train = df_mt_agg[df_mt_agg["annee"] <= train_end]
-                    monthly_matrix = create_monthly_matrix(df_train, value_col=config.variable)
+                    monthly_matrix = create_monthly_matrix(
+                        df_train, value_col=config.general_params.variable
+                    )
                     years = np.sort(df_train["annee"].unique())
 
-                    res = strategy4_long_horizon_forecast(
+                    res = run_long_horizon_forecast(
                         monthly_matrix=monthly_matrix,
                         years=years,
                         df_features=df_features,
                         df_monthly=df_mt_agg,
                         config=config,
-                        monthly_clients_lookup=client_predictions_lookup.get("Aggregated_MT", {}),
+                        monthly_clients_lookup=client_predictions_lookup.get(
+                            "Aggregated_MT", {}
+                        ),
                     )
 
                     if "monthly_forecasts" in res:
@@ -446,19 +703,40 @@ if __name__ == "__main__":
                             y: np.array(m)
                             for y, m in zip(
                                 [y for y, _ in res["horizon_predictions"]],
-                                res["monthly_forecasts"]
+                                res["monthly_forecasts"],
                             )
                         }
 
-                    all_results.append({
-                        "region": TARGET_REGION,
-                        "mode": mode,
-                        "level": "Aggregated_MT",
-                        "forecast_years": [y for y, _ in res["horizon_predictions"]],
-                        "pred_annual": [float(v) for _, v in res["horizon_predictions"]],
-                        "pred_monthly": res["monthly_forecasts"],
-                        "run_parameters": res.get("run_parameters", {}),
-                    })
+                    forecast_years = [y for y, _ in res["horizon_predictions"]]
+                    pred_annual = [float(v) for _, v in res["horizon_predictions"]]
+                    actuals = []
+                    percent_errors = []
+                    for y, v in zip(forecast_years, pred_annual):
+                        actual = None
+                        percent_error = None
+                        mask = df_mt_agg["annee"] == y
+                        if not df_mt_agg.loc[mask, config.general_params.variable].empty:
+                            actual = df_mt_agg.loc[mask, config.general_params.variable].sum()
+                            percent_error = (
+                                (v - actual) / actual * 100 if actual != 0 else None
+                            )
+
+                        actuals.append(actual)
+                        percent_errors.append(percent_error)
+
+                    all_results.append(
+                        {
+                            "region": TARGET_REGION,
+                            "mode": mode,
+                            "level": "Aggregated_MT",
+                            "forecast_years": forecast_years,
+                            "pred_annual": pred_annual,
+                            "pred_monthly": res["monthly_forecasts"],
+                            "run_parameters": res.get("run_parameters", {}),
+                            "actuals": actuals,
+                            "percent_errors": percent_errors,
+                        }
+                    )
 
             # ────────────────────────────────────────────────────────────────
             # LEVEL 4: TOTAL REGIONAL
@@ -469,7 +747,7 @@ if __name__ == "__main__":
                     df_regional.groupby(["annee", "mois"])
                     .agg({reg_var_col: "sum"})
                     .reset_index()
-                    .rename(columns={reg_var_col: config.variable})
+                    .rename(columns={reg_var_col: config.general_params.variable})
                 )
 
                 aggregate_predictions(
@@ -479,16 +757,20 @@ if __name__ == "__main__":
                 )
 
                 df_train = df_total_regional[df_total_regional["annee"] <= train_end]
-                monthly_matrix = create_monthly_matrix(df_train, value_col=config.variable)
+                monthly_matrix = create_monthly_matrix(
+                    df_train, value_col=config.general_params.variable
+                )
                 years = np.sort(df_train["annee"].unique())
 
-                res = strategy4_long_horizon_forecast(
+                res = run_long_horizon_forecast(
                     monthly_matrix=monthly_matrix,
                     years=years,
                     df_features=df_features,
                     df_monthly=df_regional,
                     config=config,
-                    monthly_clients_lookup=client_predictions_lookup.get("Total_Regional", {}),
+                    monthly_clients_lookup=client_predictions_lookup.get(
+                        "Total_Regional", {}
+                    ),
                 )
 
                 if "monthly_forecasts" in res:
@@ -496,13 +778,13 @@ if __name__ == "__main__":
                         y: np.array(m)
                         for y, m in zip(
                             [y for y, _ in res["horizon_predictions"]],
-                            res["monthly_forecasts"]
+                            res["monthly_forecasts"],
                         )
                     }
-                
+
                 forecast_years = [y for y, _ in res["horizon_predictions"]]
                 pred_annual = [float(v) for _, v in res["horizon_predictions"]]
-                
+
                 actuals = []
                 percent_errors = []
                 for y, v in zip(forecast_years, pred_annual):
@@ -511,22 +793,25 @@ if __name__ == "__main__":
                     mask = df_total_regional["annee"] == y
                     if not df_total_regional.loc[mask, reg_var_col].empty:
                         actual = df_total_regional.loc[mask, reg_var_col].sum()
-                        percent_error = (v - actual)/actual * 100 if actual != 0 else None
+                        percent_error = (
+                            (v - actual) / actual * 100 if actual != 0 else None
+                        )
                     actuals.append(actual)
                     percent_errors.append(percent_error)
 
-
-                all_results.append({
-                    "region": TARGET_REGION,
-                    "mode": mode,
-                    "level": "Total_Regional",
-                    "forecast_years": forecast_years,
-                    "pred_annual": pred_annual,
-                    "pred_monthly": res["monthly_forecasts"],
-                    "run_parameters": res.get("run_parameters", {}),
-                    "actuals":actuals,
-                    "percent_errors":percent_errors
-                })
+                all_results.append(
+                    {
+                        "region": TARGET_REGION,
+                        "mode": mode,
+                        "level": "Total_Regional",
+                        "forecast_years": forecast_years,
+                        "pred_annual": pred_annual,
+                        "pred_monthly": res["monthly_forecasts"],
+                        "run_parameters": res.get("run_parameters", {}),
+                        "actuals": actuals,
+                        "percent_errors": percent_errors,
+                    }
+                )
 
             # ────────────────────────────────────────────────────────────────
             # LEVEL 5–7: DISTRIBUTORS + SRM
@@ -537,21 +822,27 @@ if __name__ == "__main__":
                     print(f"\n{'#'*60}\nLEVEL 5: INDIVIDUAL DISTRIBUTORS\n{'#'*60}")
                     for distributor in sorted(df_dist["distributeur"].unique()):
                         df_distributor = (
-                            df_dist[df_dist["distributeur"] == distributor][["annee", "mois", dist_var_col]]
+                            df_dist[df_dist["distributeur"] == distributor][
+                                ["annee", "mois", dist_var_col]
+                            ]
                             .copy()
-                            .rename(columns={dist_var_col: config.variable})
+                            .rename(columns={dist_var_col: config.general_params.variable})
                         )
                         df_train = df_distributor[df_distributor["annee"] <= train_end]
-                        monthly_matrix = create_monthly_matrix(df_train, value_col=config.variable)
+                        monthly_matrix = create_monthly_matrix(
+                            df_train, value_col=config.general_params.variable
+                        )
                         years = np.sort(df_train["annee"].unique())
 
-                        res = strategy4_long_horizon_forecast(
+                        res = run_long_horizon_forecast(
                             monthly_matrix=monthly_matrix,
                             years=years,
                             df_features=df_features,
                             df_monthly=df_distributor,
                             config=config,
-                            monthly_clients_lookup=client_predictions_lookup.get(f"Distributor_{distributor}", {}),
+                            monthly_clients_lookup=client_predictions_lookup.get(
+                                f"Distributor_{distributor}", {}
+                            ),
                         )
 
                         entity_name = f"Distributor_{distributor}"
@@ -560,19 +851,40 @@ if __name__ == "__main__":
                                 y: np.array(m)
                                 for y, m in zip(
                                     [y for y, _ in res["horizon_predictions"]],
-                                    res["monthly_forecasts"]
+                                    res["monthly_forecasts"],
                                 )
                             }
 
-                        all_results.append({
-                            "region": TARGET_REGION,
-                            "mode": mode,
-                            "level": entity_name,
-                            "forecast_years": [y for y, _ in res["horizon_predictions"]],
-                            "pred_annual": [float(v) for _, v in res["horizon_predictions"]],
-                            "pred_monthly": res["monthly_forecasts"],
-                            "run_parameters": res.get("run_parameters", {}),
-                        })
+                        forecast_years = [y for y, _ in res["horizon_predictions"]]
+                        pred_annual = [float(v) for _, v in res["horizon_predictions"]]
+                        actuals = []
+                        percent_errors = []
+                        for y, v in zip(forecast_years, pred_annual):
+                            actual = None
+                            percent_error = None
+                            mask = df_distributor["annee"] == y
+                            if not df_distributor.loc[mask, config.general_params.variable].empty:
+                                actual = df_distributor.loc[mask, config.general_params.variable].sum()
+                                percent_error = (
+                                    (v - actual) / actual * 100 if actual != 0 else None
+                                )
+
+                            actuals.append(actual)
+                            percent_errors.append(percent_error)
+
+                        all_results.append(
+                            {
+                                "region": TARGET_REGION,
+                                "mode": mode,
+                                "level": entity_name,
+                                "forecast_years": forecast_years,
+                                "pred_annual": pred_annual,
+                                "pred_monthly": res["monthly_forecasts"],
+                                "run_parameters": res.get("run_parameters", {}),
+                                "actuals": actuals,
+                                "percent_errors": percent_errors,
+                            }
+                        )
 
                 # Level 6: All Distributors combined
                 if 6 in RUN_LEVELS:
@@ -580,40 +892,70 @@ if __name__ == "__main__":
                     aggregate_predictions(
                         client_predictions_lookup,
                         "All_Distributors",
-                        [f"Distributor_{d}" for d in sorted(df_dist["distributeur"].unique())],
+                        [
+                            f"Distributor_{d}"
+                            for d in sorted(df_dist["distributeur"].unique())
+                        ],
                     )
                     df_all_dist = (
                         df_dist.groupby(["annee", "mois"])
                         .agg({dist_var_col: "sum"})
                         .reset_index()
-                        .rename(columns={dist_var_col: config.variable})
+                        .rename(columns={dist_var_col: config.general_params.variable})
                     )
                     df_train = df_all_dist[df_all_dist["annee"] <= train_end]
-                    monthly_matrix = create_monthly_matrix(df_train, value_col=config.variable)
+                    monthly_matrix = create_monthly_matrix(
+                        df_train, value_col=config.general_params.variable
+                    )
                     years = np.sort(df_train["annee"].unique())
 
-                    res = strategy4_long_horizon_forecast(
+                    res = run_long_horizon_forecast(
                         monthly_matrix=monthly_matrix,
                         years=years,
                         df_features=df_features,
                         df_monthly=df_all_dist,
                         config=config,
-                        monthly_clients_lookup=client_predictions_lookup.get("All_Distributors", {}),
+                        monthly_clients_lookup=client_predictions_lookup.get(
+                            "All_Distributors", {}
+                        ),
                     )
 
-                    all_results.append({
-                        "region": TARGET_REGION,
-                        "mode": mode,
-                        "level": "All_Distributors",
-                        "forecast_years": [y for y, _ in res["horizon_predictions"]],
-                        "pred_annual": [float(v) for _, v in res["horizon_predictions"]],
-                        "pred_monthly": res["monthly_forecasts"],
-                        "run_parameters": res.get("run_parameters", {}),
-                    })
+                    forecast_years = [y for y, _ in res["horizon_predictions"]]
+                    pred_annual = [float(v) for _, v in res["horizon_predictions"]]
+                    actuals = []
+                    percent_errors = []
+                    for y, v in zip(forecast_years, pred_annual):
+                        actual = None
+                        percent_error = None
+                        mask = df_all_dist["annee"] == y
+                        if not df_all_dist.loc[mask, config.general_params.variable].empty:
+                            actual = df_all_dist.loc[mask, config.general_params.variable].sum()
+                            percent_error = (
+                                (v - actual) / actual * 100 if actual != 0 else None
+                            )
+
+                        actuals.append(actual)
+                        percent_errors.append(percent_error)
+
+                    all_results.append(
+                        {
+                            "region": TARGET_REGION,
+                            "mode": mode,
+                            "level": "All_Distributors",
+                            "forecast_years": forecast_years,
+                            "pred_annual": pred_annual,
+                            "pred_monthly": res["monthly_forecasts"],
+                            "run_parameters": res.get("run_parameters", {}),
+                            "actuals": actuals,
+                            "percent_errors": percent_errors,
+                        }
+                    )
 
                 # Level 7: SRM
                 if 7 in RUN_LEVELS:
-                    print(f"\n{'#'*60}\nLEVEL 7: SRM (Regional + Distributors)\n{'#'*60}")
+                    print(
+                        f"\n{'#'*60}\nLEVEL 7: SRM (Regional + Distributors)\n{'#'*60}"
+                    )
                     aggregate_predictions(
                         client_predictions_lookup,
                         "SRM_Regional_Plus_Dist",
@@ -623,81 +965,114 @@ if __name__ == "__main__":
                         df_dist.groupby(["annee", "mois"])
                         .agg({dist_var_col: "sum"})
                         .reset_index()
-                        .rename(columns={dist_var_col: config.variable})
+                        .rename(columns={dist_var_col: config.general_params.variable})
                     )
                     df_total_regional = (
                         df_regional.groupby(["annee", "mois"])
                         .agg({reg_var_col: "sum"})
                         .reset_index()
-                        .rename(columns={reg_var_col: config.variable})
+                        .rename(columns={reg_var_col: config.general_params.variable})
                     )
                     df_srm = (
                         pd.concat([df_total_regional, df_all_dist], ignore_index=True)
                         .groupby(["annee", "mois"])
-                        .agg({config.variable: "sum"})
+                        .agg({config.general_params.variable: "sum"})
                         .reset_index()
                     )
                     df_train = df_srm[df_srm["annee"] <= train_end]
-                    monthly_matrix = create_monthly_matrix(df_train, value_col=config.variable)
+                    monthly_matrix = create_monthly_matrix(
+                        df_train, value_col=config.general_params.variable
+                    )
                     years = np.sort(df_train["annee"].unique())
 
-                    res = strategy4_long_horizon_forecast(
+                    res = run_long_horizon_forecast(
                         monthly_matrix=monthly_matrix,
                         years=years,
                         df_features=df_features,
                         df_monthly=df_srm,
                         config=config,
-                        monthly_clients_lookup=client_predictions_lookup.get("SRM_Regional_Plus_Dist", {}),
+                        monthly_clients_lookup=client_predictions_lookup.get(
+                            "SRM_Regional_Plus_Dist", {}
+                        ),
                     )
 
-                    all_results.append({
-                        "region": TARGET_REGION,
-                        "mode": mode,
-                        "level": "SRM_Regional_Plus_Dist",
-                        "forecast_years": [y for y, _ in res["horizon_predictions"]],
-                        "pred_annual": [float(v) for _, v in res["horizon_predictions"]],
-                        "pred_monthly": res["monthly_forecasts"],
-                        "run_parameters": res.get("run_parameters", {}),
-                    })
+                    forecast_years = [y for y, _ in res["horizon_predictions"]]
+                    pred_annual = [float(v) for _, v in res["horizon_predictions"]]
+                    actuals = []
+                    percent_errors = []
+                    for y, v in zip(forecast_years, pred_annual):
+                        actual = None
+                        percent_error = None
+                        mask = df_srm["annee"] == y
+                        if not df_srm.loc[mask, config.general_params.variable].empty:
+                            actual = df_srm.loc[mask, config.general_params.variable].sum()
+                            percent_error = (
+                                (v - actual) / actual * 100 if actual != 0 else None
+                            )
+
+                        actuals.append(actual)
+                        percent_errors.append(percent_error)
+
+                    all_results.append(
+                        {
+                            "region": TARGET_REGION,
+                            "mode": mode,
+                            "level": "SRM_Regional_Plus_Dist",
+                            "forecast_years": forecast_years,
+                            "pred_annual": pred_annual,
+                            "pred_monthly": res["monthly_forecasts"],
+                            "run_parameters": res.get("run_parameters", {}),
+                            "actuals": actuals,
+                            "percent_errors": percent_errors,
+                        }
+                    )
 
         # ────────────────────────────────────────────────────────────────
         # OUTPUTS
         # ────────────────────────────────────────────────────────────────
-        output_dir = config.project_root / "outputs_horizon" / f"horizon_{config.horizon}y" / clean_name(TARGET_REGION)
+        output_dir = (
+            config.general_params.project_root
+            / "outputs_horizon"
+            / f"{config.general_params.exp_name}"
+            / clean_name(TARGET_REGION)
+        )
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        with open(output_dir / f"{clean_name(TARGET_REGION)}_{config.variable}_horizon_{config.horizon}y.pkl", "wb") as f:
+        with open(
+            output_dir
+            / f"{clean_name(TARGET_REGION)}_{config.general_params.variable}_{config.general_params.exp_name}.pkl",
+            "wb",
+        ) as f:
             pickle.dump(all_results, f)
 
         df_summary_records = []
         for r in all_results:
-            for y, v, actual, percent_error in zip(r["forecast_years"], r["pred_annual"], r["actuals"], r["percent_errors"]):
+            for y, v, actual, percent_error in zip(
+                r["forecast_years"], r["pred_annual"], r["actuals"], r["percent_errors"]
+            ):
                 # Flatten run parameters for the summary sheet
                 rp = r.get("run_parameters", {}) or {}
                 growth = rp.get("growth_model", {}) or {}
-                df_summary_records.append({
-                    "Region": r["region"],
-                    "Mode": r["mode"],
-                    "Level": r["level"],
-                    "Year": y,
-                    "Predicted_Annual": v,
-                    "Actual_Annual": actual,
-                    "Percent_Error":percent_error,
-                    "Feature_Block": rp.get("feature_block_name"),
-                    "Use_PF": rp.get("use_pf"),
-                    "Use_squared": rp.get("use_squared"),
-                    "Use_asymmetric_loss": rp.get("use_asymmetric_loss"),
-                    "Use_Clients": rp.get("use_clients"),
-                    "Feature_Transforms": (None if rp.get("feature_transforms") is None else str(rp.get("feature_transforms"))),
-                    "Feature_Lags": (None if rp.get("feature_lags") is None else str(rp.get("feature_lags"))),
-                    "Growth_Rho": growth.get("rho"),
-                    "Growth_Mu": growth.get("mu"),
-                    "Growth_Beta": growth.get("beta"),
-                    "Growth_Gamma": growth.get("gamma")
-                })
+                feature_config = rp.get("feature_config", {}) or {}
+
+                df_summary_records.append(
+                    {
+                        "Region": r["region"],
+                        "Mode": r["mode"],
+                        "Level": r["level"],
+                        "Year": y,
+                        "Predicted_Annual": v,
+                        "Actual_Annual": actual,
+                        "Percent_Error": percent_error,
+                        **feature_config,
+                        **growth
+                    }
+                )
 
         df_summary = pd.DataFrame(df_summary_records)
-        out_xlsx = output_dir / f"summary_{clean_name(TARGET_REGION)}_{config.variable}_horizon_{config.horizon}y.xlsx"
+        out_xlsx = (
+            output_dir
+            / f"summary_{clean_name(TARGET_REGION)}_{config.general_params.variable}_{config.general_params.exp_name}.xlsx"
+        )
         df_summary.to_excel(out_xlsx, index=False)
         print(f"\n📁 Saved horizon forecasts to {out_xlsx}")
-
