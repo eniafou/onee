@@ -12,7 +12,6 @@ import pickle
 import joblib
 warnings.filterwarnings('ignore')
 
-from kmodes.kprototypes import KPrototypes
 import numpy as np
 import pandas as pd
 
@@ -145,21 +144,21 @@ if 1 in RUN_LEVELS:
     print(f"🔗 Similarity contracts: {len(similarity_contracts)}")
 
     # --- Process established contracts (normal forecasting) ---
-    # all_results_established = []
-    # for i, contrat in enumerate(established_contracts):
-    #     df_contrat = df_contrats[df_contrats['contrat'] == contrat].copy()
-    #     result = run_analysis_for_entity(
-    #         df_contrat,
-    #         f"Contrat_{contrat}",
-    #         df_features,
-    #         config=ANALYSIS_CONFIG,
-    #         favor_overestimation=True,
-    #         under_estimation_penalty=1.5,
-    #     )
-    #     if result:
-    #         all_results_established.append(result)
-    all_results_established = joblib.load(PROJECT_ROOT / "outputs_cd/all_results_contrat_s4_overestimation.pkl")
-    all_results_established = filter_established_entities(all_results_established, growth_contracts, similarity_contracts)
+    all_results_established = []
+    for i, contrat in enumerate(established_contracts):
+        df_contrat = df_contrats[df_contrats['contrat'] == contrat].copy()
+        result = run_analysis_for_entity(
+            df_contrat,
+            f"Contrat_{contrat}",
+            df_features,
+            config=ANALYSIS_CONFIG,
+            favor_overestimation=True,
+            under_estimation_penalty=1.5,
+        )
+        if result:
+            all_results_established.append(result)
+    # all_results_established = joblib.load(PROJECT_ROOT / "outputs_cd/all_results_contrat_s4_overestimation.pkl")
+    # all_results_established = filter_established_entities(all_results_established, growth_contracts, similarity_contracts)
 
     all_results_growth = []
     for contrat in growth_contracts:

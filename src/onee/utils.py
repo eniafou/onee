@@ -389,3 +389,42 @@ def plot_time_evolution(
     )
     fig.update_layout(xaxis_title="Year", yaxis_title=value_col)
     return fig
+
+
+import pandas as pd
+
+def fill_2020_with_avg(df, value_col):
+    """
+    Replace values for year 2020 by the average of 2019 and 2021 for each month.
+    
+    Parameters
+    ----------
+    df : pd.DataFrame
+        Must contain columns ['annee', 'mois', value_col].
+    value_col : str
+        Name of the numeric column to modify.
+        
+    Returns
+    -------
+    pd.DataFrame
+        Copy of df where 2020 values are replaced.
+    """
+    
+    df = df.copy()
+    
+    # Extract 2019, 2020, 2021 subsets
+    df_2019 = df[df["annee"] == 2019][["mois", value_col]].rename(columns={value_col: "v2019"})
+    df_2021 = df[df["annee"] == 2021][["mois", value_col]].rename(columns={value_col: "v2021"})
+    
+    # Merge 2019 and 2021 month-wise
+    avg_2019_2021 = pd.merge(df_2019, df_2021, on="mois", how="inner")
+    avg_2019_2021["avg"] = avg_2019_2021[["v2019", "v2021"]].mean(axis=1)
+    
+    # Insert the computed average into 2020 rows
+    df.loc[df["annee"] == 2020, value_col] = (
+        df.loc[df["annee"] == 2020, "mois"]
+          .map(avg_2019_2021.set_index("mois")["avg"])
+          .values
+    )
+    
+    return df

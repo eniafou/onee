@@ -15,8 +15,8 @@ from forecast_strategies import run_analysis_for_entity, save_summary
 PROJECT_ROOT = Path(__file__).resolve().parents[0]
 
 UNIT = "Kwh"
-VARIABLE = "consommation_kwh"              # supported examples: "nbr_clients", "consommation_kwh"
-exp_name = "2017"
+VARIABLE = "nbr_clients"              # supported examples: "nbr_clients", "consommation_kwh"
+exp_name = "nbr_clients_excels" #"nbr_clients_excels"
 
 N_PCS = 3
 LAGS_OPTIONS = [2, 3]
@@ -36,8 +36,8 @@ FEATURE_BLOCKS = {
     'sectoral_only': ['gdp_primaire', 'gdp_secondaire', 'gdp_tertiaire'],
     'gdp_sectoral': ['pib_mdh', 'gdp_primaire', 'gdp_secondaire', 'gdp_tertiaire'],
 }
-eval_years_start = 2015
-eval_years_end = 2017
+eval_years_start = 2021
+eval_years_end = 2023
 growth_feature_transforms = [("lag_lchg",)]
 growth_feature_lags = [(1,)]
 ANALYSIS_CONFIG = {
@@ -131,7 +131,6 @@ def load_client_prediction_lookup(region_name: str) -> dict[str, dict[int, np.nd
 
     return lookup
 
-
 def aggregate_predictions(
     lookup: dict[str, dict[int, np.ndarray]],
     target_name: str,
@@ -141,6 +140,9 @@ def aggregate_predictions(
     Combine monthly predictions from `component_names` and store them in `lookup[target_name]`.
     Missing components are skipped; only years with at least one component prediction are kept.
     """
+    if target_name in lookup:
+        return
+    
     combined: dict[int, np.ndarray] = {}
 
     for component in component_names:
@@ -239,13 +241,14 @@ def clean_name(name: str) -> str:
 # MAIN PIPELINE
 # ────────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    REGIONS = ["Béni Mellal-Khénifra", "Casablanca-Settat", "Drâa-Tafilalet", "Fès-Meknès", "Laâyoune-Sakia El Hamra", "Marrakech-Safi", "Oriental", "Rabat-Salé-Kénitra", "Tanger-Tétouan-Al Hoceïma", "Souss-Massa"]
-
+    # REGIONS = ["Béni Mellal-Khénifra", "Casablanca-Settat", "Drâa-Tafilalet", "Fès-Meknès", "Laâyoune-Sakia El Hamra", "Marrakech-Safi", "Oriental", "Rabat-Salé-Kénitra", "Tanger-Tétouan-Al Hoceïma", "Souss-Massa"]
+    REGIONS = ["Casablanca-Settat", "Drâa-Tafilalet", "Fès-Meknès", "Laâyoune-Sakia El Hamra", "Oriental", "Rabat-Salé-Kénitra", "Tanger-Tétouan-Al Hoceïma", "Souss-Massa"]
+    # REGIONS = ["Casablanca-Settat"]
     # Choose which analysis parts (levels) to run
     # 1: Activities, 2: Aggregated BT, 3: Aggregated MT, 4: Total Regional,
     # 5: Individual Distributors, 6: All Distributors, 7: SRM (Regional+Dist)
     # RUN_LEVELS = {1, 4, 5, 6, 7}
-    RUN_LEVELS = {1,4,5,6,7}
+    RUN_LEVELS = {1,4}
 
     for TARGET_REGION in REGIONS:
         print(f"Loading data for {TARGET_REGION}...\n")
@@ -498,7 +501,7 @@ if __name__ == "__main__":
         monthly_book_file = output_dir / f'monthly_predictions_by_entity_{clean_name(TARGET_REGION)}_{VARIABLE}_{exp_name}.xlsx'
         save_summary(all_results, output_file, monthly_book_file)
 
-        with open(output_dir / f'all_results_{clean_name(TARGET_REGION)}_{VARIABLE}_{exp_name}.pkl', "wb") as f:
+        with open(output_dir / f'all_results_{clean_name(TARGET_REGION)}_{VARIABLE}.pkl', "wb") as f:#_{exp_name}
             pickle.dump(all_results, f)
 
         print(f"\n{'='*60}")

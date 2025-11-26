@@ -3,6 +3,7 @@ __pycache__/
 data/
 outputs_cd/
 outputs_srm/
+outputs_horizon/
 record/
 *.egg-info/
 *.egg

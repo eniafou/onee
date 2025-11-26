@@ -1,6 +1,6 @@
 from sklearn.preprocessing import StandardScaler
 from sklearn.linear_model import Ridge
-from growth_rate_model import MeanRevertingGrowthModel, build_growth_rate_features
+from onee.growth_rate_model import MeanRevertingGrowthModel, build_growth_rate_features
 from onee.utils import (
     add_monthly_feature,
     add_exogenous_features,
@@ -131,7 +131,6 @@ def _weighted_quantile(values, weights, tau):
     idx = np.clip(idx, 0, len(v) - 1)
     return v[idx]
 
-
 def _fit_lambda_pinball(y, p, tau=0.75, eps=1e-8):
     """
     Closed-form lambda under pinball loss: lambda is the weighted tau-quantile
@@ -139,14 +138,28 @@ def _fit_lambda_pinball(y, p, tau=0.75, eps=1e-8):
     """
     y = np.asarray(y, dtype=float)
     p = np.asarray(p, dtype=float)
-    p_safe = np.where(p > eps, p, np.nan)  # ignore non-positive or near-zero preds
-    z = (y / p_safe) - 1.0
-    w = p_safe
+    
+    # Filter out invalid predictions
+    valid_mask = (p > eps) & np.isfinite(p) & np.isfinite(y)
+    
+    if not valid_mask.any():
+        # No valid data points
+        return 0.0
+    
+    y_valid = y[valid_mask]
+    p_valid = p[valid_mask]
+    
+    z = (y_valid / p_valid) - 1.0
+    w = p_valid
+    
     lam = _weighted_quantile(z, w, tau)
-    # Optional: ensure we don't flip sign crazily; you can clip if desired:
+    
+    # Optional: ensure we don't flip sign crazily
     # lam = np.clip(lam, -0.5, 2.0)
+    
     if not np.isfinite(lam):
         lam = 0.0
+    
     return lam
 
 
@@ -162,6 +175,8 @@ def build_ensemble_result(
     Combine multiple strategy outputs into a weighted ensemble, then apply an
     asymmetric-upward-bias calibration factor (1 + lambda), where lambda is learned
     by minimizing a pinball (quantile) loss with tau > 0.5 (penalizes underestimates more).
+    
+    This version prevents future data leakage by training weights and lambda on past data only.
     """
     models = [m for m in best_models if m is not None]
     if len(models) < 2:
@@ -187,51 +202,72 @@ def build_ensemble_result(
     # Use mean of actuals across models as reference
     reference_actual = model_actuals.mean(axis=0)  # (n_years, 12)
 
-    # ====== Learn weights (unchanged) ======
-    if weights is None:
-        preds_flat = model_preds.transpose(1, 2, 0).reshape(-1, len(models))
-        actual_flat = reference_actual.reshape(-1)
-        try:
-            learned = np.linalg.lstsq(preds_flat, actual_flat, rcond=None)[0]
-        except np.linalg.LinAlgError:
-            learned = np.ones(len(models), dtype=float)
-        learned = np.clip(learned, 0.0, None)
-        if not np.isfinite(learned).all() or learned.sum() <= 0:
-            weights = np.ones(len(models), dtype=float)
+    # Initialize ensemble predictions and tracking arrays
+    ensemble_preds = np.zeros((len(ordered_years), 12))
+    lambda_values = []
+    weights_history = []
+
+    # Iterate over each year
+    for i in range(len(ordered_years)):
+        if i == 0:
+            # For the first year, use equal weights and no lambda adjustment
+            current_weights = np.ones(len(models), dtype=float) / len(models)
+            ensemble_preds[i] = np.tensordot(current_weights, model_preds[:, i, :], axes=(0, 0))
+            lambda_values.append(0.0)
+            weights_history.append(current_weights)
         else:
-            weights = learned
-    else:
-        weights = np.asarray(weights, dtype=float)
+            # Use only data from previous years (0 to i-1) for training
+            train_preds = model_preds[:, :i, :]  # (n_models, i, 12)
+            train_actuals = reference_actual[:i, :]  # (i, 12)
 
-    if weights.sum() == 0:
-        weights = np.ones(len(models), dtype=float)
-    weights = weights / weights.sum()
+            # Learn ensemble weights based on past data
+            if weights is None:
+                preds_flat = train_preds.transpose(1, 2, 0).reshape(-1, len(models))
+                actual_flat = train_actuals.flatten()
+                try:
+                    learned_weights = np.linalg.lstsq(preds_flat, actual_flat, rcond=None)[0]
+                except np.linalg.LinAlgError:
+                    learned_weights = np.ones(len(models), dtype=float)
 
-    # Unbiased ensemble
-    ensemble_preds = np.tensordot(weights, model_preds, axes=(0, 0))  # (n_years, 12)
+                # Clip and normalize weights
+                learned_weights = np.clip(learned_weights, 0.0, None)
+                if not np.isfinite(learned_weights).all() or learned_weights.sum() <= 0:
+                    learned_weights = np.ones(len(models), dtype=float)
+                learned_weights = learned_weights / learned_weights.sum()
+            else:
+                learned_weights = np.asarray(weights, dtype=float)
+                if learned_weights.sum() == 0:
+                    learned_weights = np.ones(len(models), dtype=float)
+                learned_weights = learned_weights / learned_weights.sum()
 
-    # ====== Learn lambda with asymmetric (pinball) loss ======
-    # You can fit on monthly values (default) or on annual aggregates if use_annual=True.
-    actual_monthly = reference_actual
-    pred_monthly_unbiased = ensemble_preds
+            weights_history.append(learned_weights)
 
-    if use_annual:
-        y_fit = actual_monthly.sum(axis=1)  # (n_years,)
-        p_fit = pred_monthly_unbiased.sum(axis=1)  # (n_years,)
-    else:
-        y_fit = actual_monthly.flatten()  # (n_years*12,)
-        p_fit = pred_monthly_unbiased.flatten()  # (n_years*12,)
+            # Create unbiased ensemble prediction for current year using learned weights
+            pred_monthly_unbiased = np.tensordot(learned_weights, model_preds[:, i, :], axes=(0, 0))
 
-    lam = _fit_lambda_pinball(y_fit, p_fit, tau=float(tau))
+            # Learn lambda (asymmetric bias) based on past data
+            ensemble_train_preds = np.tensordot(learned_weights, train_preds, axes=(0, 0))  # (i, 12)
 
-    # Apply upward bias factor
-    pred_monthly = (1.0 + lam) * pred_monthly_unbiased
-    actual_annual = actual_monthly.sum(axis=1)
-    pred_annual = pred_monthly.sum(axis=1)
+            if use_annual:
+                y_fit = train_actuals.sum(axis=1)  # (i,)
+                p_fit = ensemble_train_preds.sum(axis=1)  # (i,)
+            else:
+                y_fit = train_actuals.flatten()  # (i*12,)
+                p_fit = ensemble_train_preds.flatten()  # (i*12,)
+
+            lam = _fit_lambda_pinball(y_fit, p_fit, tau=float(tau))
+            lambda_values.append(lam)
+
+            # Apply the bias factor to current year's prediction
+            ensemble_preds[i] = (1.0 + lam) * pred_monthly_unbiased
+
+    # Calculate metrics on all predictions
+    actual_annual = reference_actual.sum(axis=1)
+    pred_annual = ensemble_preds.sum(axis=1)
 
     metrics = calculate_all_metrics(
-        actual_monthly.flatten(),
-        pred_monthly.flatten(),
+        reference_actual.flatten(),
+        ensemble_preds.flatten(),
         actual_annual,
         pred_annual,
     )
@@ -246,6 +282,10 @@ def build_ensemble_result(
         for m in models
     ]
 
+    # Use the final learned weights (or average of all weights)
+    final_weights = weights_history[-1] if weights_history else np.ones(len(models)) / len(models)
+    final_lambda = lambda_values[-1] if lambda_values else 0.0
+
     return {
         "strategy": strategy_name,
         "n_lags": tuple(m.get("n_lags") for m in models),
@@ -258,18 +298,19 @@ def build_ensemble_result(
         "client_pattern_weight": tuple(
             m.get("client_pattern_weight", "N/A") for m in models
         ),
-        "ensemble_weights": weights.tolist(),
+        "ensemble_weights": final_weights.tolist(),
         "ensemble_reference_strategies": component_strategies,
         "ensemble_component_details": component_details,
-        "pred_monthly_matrix": pred_monthly,
-        "actual_monthly_matrix": actual_monthly,
+        "pred_monthly_matrix": ensemble_preds,
+        "actual_monthly_matrix": reference_actual,
         "valid_years": np.array(ordered_years),
-        "bias_lambda": float(lam),
+        "bias_lambda": final_lambda,
         "bias_tau": float(tau),
         "bias_fit_target": "annual" if use_annual else "monthly",
+        "lambda_history": lambda_values,
+        "weights_history": [w.tolist() for w in weights_history],
         **metrics,
     }
-
 
 def _normalize_monthly_lookup(
     series_lookup: Optional[Mapping[int, Iterable[float]]],

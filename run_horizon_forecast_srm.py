@@ -2,12 +2,18 @@
 # run_horizon_forecast_srm.py (Clean + Correct)
 # ─────────────────────────────────────────────────────────────
 
-from growth_rate_model import MeanRevertingGrowthModelARP, MeanRevertingGrowthModel, PCAMeanRevertingGrowthModel, RawMeanRevertingGrowthModel, LocalInterpolationForecastModel
+from onee.growth_rate_model import (MeanRevertingGrowthModelARP, 
+                               MeanRevertingGrowthModel, 
+                               PCAMeanRevertingGrowthModel, 
+                               RawMeanRevertingGrowthModel, 
+                               LocalInterpolationForecastModel, 
+                               AsymmetricAdaptiveTrendModel,
+                               GaussianProcessForecastModel)
 from forecast_strategies import (
-    build_growth_rate_features,
     create_monthly_matrix,
 )
-from onee.utils import select_best_model, calculate_all_annual_metrics
+from horizon_forecast_strategies import run_long_horizon_forecast
+from onee.utils import fill_2020_with_avg
 from run_forecast_srm import (
     clean_name,
     get_queries_for,
@@ -24,7 +30,6 @@ import warnings
 
 from pydantic import BaseModel, Field
 from typing import List, Tuple, Dict, Optional
-from itertools import product
 
 warnings.filterwarnings("ignore")
 
@@ -38,6 +43,8 @@ MODEL_REGISTRY = {
     "PCAMeanRevertingGrowthModel": PCAMeanRevertingGrowthModel,
     "RawMeanRevertingGrowthModel": RawMeanRevertingGrowthModel,
     "LocalInterpolationForecastModel": LocalInterpolationForecastModel,
+    "AsymmetricAdaptiveTrendModel": AsymmetricAdaptiveTrendModel,
+    "GaussianProcessForecastModel": GaussianProcessForecastModel
 }
 
 class GeneralParams(BaseModel):
@@ -48,18 +55,18 @@ class GeneralParams(BaseModel):
     unit: str = "Kwh"
     r2_threshold: float = 0.6
     model_classes: List[str] = Field(
-        default_factory=lambda: ["MeanRevertingGrowthModel", "MeanRevertingGrowthModelARP"] # "MeanRevertingGrowthModelARP", "MeanRevertingGrowthModel", "PCAMeanRevertingGrowthModel", "RawMeanRevertingGrowthModel", "LocalInterpolationForecastModel"
+        default_factory=lambda: ["GaussianProcessForecastModel"] # "GaussianProcessForecastModel", "MeanRevertingGrowthModelARP", "MeanRevertingGrowthModel", "PCAMeanRevertingGrowthModel", "RawMeanRevertingGrowthModel", "LocalInterpolationForecastModel", "AsymmetricAdaptiveTrendModel", ""
     )
 
 
 class FeatureBuildingGrid(BaseModel):
     transforms: Tuple[Tuple[str, ...], ...] = (
-        # ("lchg",),
-        # ("level",),
-        ("lchg", "level"),
-        # ("lag_lchg",),
+        ("lchg",),
+        ("lchg", "lag_lchg"),
+        ("level"),
+        ("level", "lag"),
     )
-    lags: Tuple[Tuple[int, ...], ...] = ((1),)
+    lags: Tuple[Tuple[int, ...], ...] = ((1,2),)
     feature_block: List[List[str]] = Field(
         default_factory=lambda: [
             [],
@@ -69,8 +76,8 @@ class FeatureBuildingGrid(BaseModel):
         ]
     )
     use_pf: List[bool] = Field(default_factory=lambda: [False])
-    use_clients: List[bool] = Field(default_factory=lambda: [True, False])
-    training_window: List[Optional[int]] = Field(default_factory=lambda: [None, 3, 5])
+    use_clients: List[bool] = Field(default_factory=lambda: [True])
+    training_window: List[Optional[int]] = Field(default_factory=lambda: [None])
 
 
 class ModelHyperparameterGrid(BaseModel):
@@ -81,34 +88,46 @@ class ModelHyperparameterGrid(BaseModel):
     include_ar_squared: List[bool] = Field(default_factory=lambda: [True, False])
 
     # AR(p)-only parameter (ignored by basic model, warning issued)
-    ar_lags: List[int] = Field(default_factory=lambda: [3, 5])
+    ar_lags: List[int] = Field(default_factory=lambda: [2, 3, 5])
 
     # Regularization
-    l2_penalty: List[float] = Field(default_factory=lambda: [0.0, 10])
+    l2_penalty: List[float] = Field(default_factory=lambda: [0.0])
     # beta_bounds: List[Tuple[float, float]] = Field(
     #     default_factory=lambda: [(-1.0, 1.0)]
     # )
 
-    rho_bounds: List[Tuple[float, float]] = Field(
-        default_factory=lambda: [(0.00, 1.0)]
-    )
+    # rho_bounds: List[Tuple[float, float]] = Field(
+    #     default_factory=lambda: [(0.0, 1.0)]
+    # )
 
     # Asymmetric loss
     use_asymmetric_loss: List[bool] = Field(
-        default_factory=lambda: [False, True]
+        default_factory=lambda: [True]
     )
-    # underestimation_penalty: List[float] = Field(
-    #     default_factory=lambda: [1.0, 2.0, 3.0]
-    # )
+    underestimation_penalty: List[float] = Field(
+        default_factory=lambda: [2.0, 5.0]
+    )
 
     # PCA-based model
     n_pcs: List[int] = Field(default_factory=lambda: [2, 3])
     pca_lambda: List[float] = Field(default_factory=lambda: [0.3, 0.9])
 
     # Local interpolation model params
-    window_size: List[int] = Field(default_factory=lambda: [3, 5, 7])
-    weighted: List[bool] = Field(default_factory=lambda: [True])
-    weight_decay: List[float] = Field(default_factory=lambda: [0.5, 0.9])
+    window_size: List[int] = Field(default_factory=lambda: [3])
+    weight_decay: List[float] = Field(default_factory=lambda: [0.6, 1])
+    selection_mode: List[str] = Field(
+        default_factory=lambda: ["in_sample"] # "cross_validation", "in_sample"
+    )
+    fit_on_growth_rates: List[bool] = Field(
+        default_factory=lambda: [True]
+    )
+    use_full_history: List[bool] = Field(
+        default_factory=lambda: [True]
+    )
+
+    # Gaussian Process model params
+    n_restarts_optimizer: List[int] = Field(default_factory=lambda: [10])
+    normalize_y: List[bool] = Field(default_factory=lambda: [True, False])
 
 
 
@@ -120,302 +139,6 @@ class ForecastConfig(BaseModel):
  
 
 
-def run_annual_loocv_grid_search(
-    monthly_matrix,
-    years,
-    df_features,
-    df_monthly,
-    monthly_clients_lookup,
-    GrowthModelClass,
-    feature_building_grid,
-    model_hyperparameter_grid,
-    metric_fn,     # A function to compute metrics (actual_annual, pred_annual) → dict
-):
-    """
-    Perform annual-only LOOCV grid search over model and feature-building configurations.
-
-    Returns:
-        A list of dictionaries, each containing:
-            - model_config
-            - feature_config
-            - pred_annual_values
-            - actual_annual_values
-            - valid_years
-            - flat metrics
-    """
-
-    n_years = len(years)
-    annual_consumption = monthly_matrix.sum(axis=1)
-
-    # -------------------------------------------------------------------------
-    # Extract grid dicts from pydantic objects
-    # -------------------------------------------------------------------------
-    fg = feature_building_grid.dict()
-    mg = model_hyperparameter_grid.dict()
-
-    mg = {
-        k: v for k, v in mg.items() 
-        if k in GrowthModelClass.SUPPORTED_HYPERPARAMS
-    }
-
-    if GrowthModelClass.__name__ == "LocalInterpolationForecastModel":
-        fg = {"feature_block": [[]], "training_window": [None]}
-
-    # print(mg)
-    # print(fg)
-    # -------------------------------------------------------------------------
-    # training_window MUST be handled separately
-    # -------------------------------------------------------------------------
-    if "training_window" not in fg:
-        print("⚠️ feature_building_grid does not contain 'training_window'.")
-        training_windows = [None]
-    else:
-        training_windows = fg.pop("training_window")
-
-    # All remaining fields in fg are hyperparameters for build_growth_rate_features
-    feature_param_names = list(fg.keys())
-    feature_param_values = list(fg.values())
-
-    # All fields in mg are hyperparameters for GrowthModelClass
-    model_param_names = list(mg.keys())
-    model_param_values = list(mg.values())
-
-    results = []
-
-    # -------------------------------------------------------------------------
-    # GRID SEARCH
-    # -------------------------------------------------------------------------
-    for training_window in training_windows:
-        # Loop over feature-building parameters (Cartesian product)
-        for feature_values in product(*feature_param_values):
-            # Build the feature configuration dict for this iteration
-            feature_config_dict = dict(zip(feature_param_names, feature_values))
-            feature_config_dict["training_window"] = training_window
-
-            # Loop over model hyperparameters (Cartesian product)
-            for model_values in product(*model_param_values):
-
-                model_config_dict = dict(zip(model_param_names, model_values))
-                # Storage for LOOCV
-                pred_annual_list = []
-                actual_annual_list = []
-                valid_years_list = []
-
-                # -------------------------------------------------------------
-                # LOOCV — predict year t using train < t
-                # -------------------------------------------------------------
-                for test_idx in range(2, n_years):
-
-                    # Determine training range
-                    if training_window is not None:
-                        start_idx = max(0, test_idx - training_window)
-                    else:
-                        start_idx = 0
-
-                    train_indices = [
-                        i for i in range(n_years)
-                        if (i < test_idx and i >= start_idx)
-                    ]
-
-                    # Need at least 3 annual observations for stable fitting
-                    if len(train_indices) < 3:
-                        continue
-
-                    train_years = [years[i] for i in train_indices]
-                    train_annual = annual_consumption[train_indices]
-
-                    # ---------------------------------------------------------
-                    # Build training features
-                    # ---------------------------------------------------------
-                    train_features = build_growth_rate_features(
-                        train_years,
-                        df_features=df_features,
-                        df_monthly=df_monthly,
-                        clients_lookup=monthly_clients_lookup,
-                        **feature_config_dict
-                    )
-                    # Convert to numpy
-                    if train_features is not None:
-                        train_features_array = np.asarray(train_features, float)
-                    else:
-                        train_features_array = None
-
-                    # Sort by year for safety
-                    train_years_array = np.asarray(train_years, int)
-                    sort_idx = np.argsort(train_years_array)
-                    train_years_array = train_years_array[sort_idx]
-                    train_annual_sorted = np.asarray(train_annual, float)[sort_idx]
-                    train_monthly_sorted = monthly_matrix[train_indices][sort_idx]
-
-                    if train_features_array is not None:
-                        train_features_array = train_features_array[sort_idx]
-
-                    # ---------------------------------------------------------
-                    # Train model
-                    # ---------------------------------------------------------
-                    try:
-                        model = GrowthModelClass(**model_config_dict)
-                        model.fit(y = train_annual_sorted, X = train_features_array, years = train_years, monthly_matrix=train_monthly_sorted)
-                    except Exception:
-                        continue  # skip this fold if model fails
-
-                    # ---------------------------------------------------------
-                    # Build test features
-                    # ---------------------------------------------------------
-                    test_year = int(years[test_idx])
-                    test_features = build_growth_rate_features(
-                        [test_year],
-                        df_features=df_features,
-                        df_monthly=df_monthly,
-                        clients_lookup=monthly_clients_lookup,
-                        **feature_config_dict
-                    )
-
-                    if test_features is not None:
-                        test_features_array = np.asarray(test_features, float)[0]
-                    else:
-                        test_features_array = None
-
-                    # ---------------------------------------------------------
-                    # Predict annual
-                    # ---------------------------------------------------------
-                    try:
-                        pred_annual = model.predict(test_features_array)
-                    except Exception:
-                        continue
-
-                    actual_annual = annual_consumption[test_idx]
-
-                    pred_annual_list.append(pred_annual)
-                    actual_annual_list.append(actual_annual)
-                    valid_years_list.append(test_year)
-
-                # End LOOCV loop ------------------------------------------------
-
-                # Skip if no valid folds
-                if len(pred_annual_list) == 0:
-                    continue
-
-                pred_arr = np.array(pred_annual_list)
-                act_arr = np.array(actual_annual_list)
-                valid_years_arr = np.array(valid_years_list)
-
-                # -------------------------------------------------------------
-                # Compute metrics
-                # -------------------------------------------------------------
-                metrics = metric_fn(
-                    actual_annual=act_arr,
-                    pred_annual=pred_arr,
-                )
-
-                # -------------------------------------------------------------
-                # Store result
-                # -------------------------------------------------------------
-                results.append(
-                    {   
-                        "model_name": GrowthModelClass.__name__,
-                        "model_class": GrowthModelClass,   
-                        "model_config": model.get_params(),
-                        "feature_config": feature_config_dict,
-                        "pred_annual_values": pred_arr,
-                        "actual_annual_values": act_arr,
-                        "valid_years": valid_years_arr,
-                        **metrics,
-                    }
-                )
-
-    return results
-
-
-
-def run_long_horizon_forecast(
-    monthly_matrix,
-    years,
-    df_features,
-    df_monthly,
-    config: ForecastConfig,
-    monthly_clients_lookup=None,
-):
-    # Step 1. Run LOOCV search across all param combinations from ForecastConfig
-    all_results = []
-
-    for model_name in config.general_params.model_classes:
-        model_class = MODEL_REGISTRY[model_name]
-        results = run_annual_loocv_grid_search(
-            monthly_matrix=monthly_matrix,
-            years=years,
-            df_features=df_features,
-            df_monthly=df_monthly,
-            monthly_clients_lookup=monthly_clients_lookup,
-            GrowthModelClass=model_class,
-            feature_building_grid=config.feature_building_grid,
-            model_hyperparameter_grid=config.model_hyperparameter_grid,
-            metric_fn=calculate_all_annual_metrics,
-        )
-        all_results+=results
-
-    best_result = select_best_model(all_results, r2_threshold=config.general_params.r2_threshold)
-
-    print(
-        f"\n🏆 Best model: {best_result['model_name']} | R²={best_result.get('annual_r2', 0):.3f}"
-    )
-    training_window = best_result["feature_config"].get("training_window", None)
-
-    # Determine which years to use
-    n_years = len(years)
-
-    if training_window is None:
-        # Use all years
-        train_start = 0
-    else:
-        # Use only the last N years (handle short dataset edge case)
-        train_start = max(0, n_years - training_window)
-
-    train_years = years[train_start:]
-    monthly_matrix = monthly_matrix[train_start:]
-    train_annual = monthly_matrix.sum(axis=1)
-
-    growth_features = build_growth_rate_features(
-        years=train_years,
-        df_features=df_features,
-        clients_lookup=monthly_clients_lookup,
-        df_monthly=df_monthly,
-        **best_result["feature_config"],   # includes feature_blocks, transforms, lags, etc.
-    )
-    BestModelClass = best_result["model_class"]
-
-    growth_model = BestModelClass(
-        **best_result["model_config"]
-    )
-
-    growth_model.fit(y = train_annual, X = growth_features, years = train_years, monthly_matrix=monthly_matrix)
-
-    # Step 5. Forecast horizon years using best params
-    last_year = int(max(years))
-
-    horizon_preds = growth_model.forecast_horizon(
-        df_features=df_features,
-        start_year=last_year,
-        horizon=config.general_params.horizon,
-        monthly_clients_lookup=monthly_clients_lookup,
-        df_monthly=df_monthly,
-        feature_config=best_result["feature_config"]
-    )
-
-    # Step 6. Distribute annual forecasts to months
-    mean_curve = monthly_matrix.mean(axis=0)
-    mean_curve_norm = mean_curve / mean_curve.sum()
-    future_monthly = [val * mean_curve_norm for _, val in horizon_preds]
-
-    return {
-        "horizon_predictions": horizon_preds,
-        "monthly_forecasts": future_monthly,
-        "run_parameters": {
-            "feature_config": best_result["feature_config"],
-            "growth_model": {"model_name":best_result['model_name'],**best_result["model_config"]},
-        },
-    }
-
 
 # ─────────────────────────────────────────────────────────────
 # MAIN EXECUTION
@@ -425,13 +148,16 @@ if __name__ == "__main__":
     config = ForecastConfig(
         general_params=GeneralParams(
             project_root=Path(__file__).resolve().parents[0],
-            exp_name="srm_arp",
+            exp_name="new_gaussian_interplolation_3",
             horizon=5
         )
     )
 
     REGIONS = [
-        "Béni Mellal-Khénifra", "Casablanca-Settat", "Drâa-Tafilalet", "Fès-Meknès",
+        "Casablanca-Settat",
+        "Béni Mellal-Khénifra",
+        "Drâa-Tafilalet", 
+        "Fès-Meknès",
         "Laâyoune-Sakia El Hamra",
         "Marrakech-Safi",
         "Oriental",
@@ -440,18 +166,26 @@ if __name__ == "__main__":
         "Souss-Massa",
     ]
 
-    REGIONS = ["Casablanca-Settat"]
     # Choose which analysis parts (levels) to run
     # 1: Activities, 2: Aggregated BT, 3: Aggregated MT, 4: Total Regional,
     # 5: Individual Distributors, 6: All Distributors, 7: SRM (Regional+Dist)
-    RUN_LEVELS = {4}
+    RUN_LEVELS = {4,6,7}
+
     forecast_types = {
         # "forward": (2007, 2023),
-        "backtest": (2007, 2020),
+        "backtest": (2007, 2021),
     }
 
     for TARGET_REGION in REGIONS:
         print(f"\n{'='*80}\n🌍 REGION: {TARGET_REGION}\n{'='*80}")
+
+        output_dir = (
+            config.general_params.project_root
+            / "outputs_horizon"
+            / f"{config.general_params.exp_name}"
+            / clean_name(TARGET_REGION)
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
 
         db_regional = sqlite3.connect(
             config.general_params.project_root / "data/ONEE_Regional_COMPLETE_2007_2023.db"
@@ -468,6 +202,12 @@ if __name__ == "__main__":
         df_features = pd.read_sql_query(q_features, db_regional)
         df_dist = pd.read_sql_query(q_dist, db_dist) if q_dist is not None else None
 
+        df_regional_bt = df_regional_bt[df_regional_bt["annee"] >= 2013]
+        df_regional_mt = df_regional_mt[df_regional_mt["annee"] >= 2013]
+        df_features = df_features[df_features["annee"] >= 2013]
+        if df_dist is not None:
+            df_dist = df_dist[df_dist["annee"] >= 2013]
+
         db_regional.close()
         db_dist.close()
 
@@ -475,7 +215,6 @@ if __name__ == "__main__":
             "Administratif", "Administratif_mt"
         )
         df_regional = pd.concat([df_regional_bt, df_regional_mt])
-
         reg_var_col = var_cols["regional"]
         require_columns(
 
@@ -524,6 +263,7 @@ if __name__ == "__main__":
                         .copy()
                         .rename(columns={reg_var_col: config.general_params.variable})
                     )
+                    df_activity = fill_2020_with_avg(df_activity, reg_var_col)
                     df_train = df_activity[df_activity["annee"] <= train_end]
                     monthly_matrix = create_monthly_matrix(
                         df_train, value_col=config.general_params.variable
@@ -536,20 +276,11 @@ if __name__ == "__main__":
                         df_features=df_features,
                         df_monthly=df_activity,
                         config=config,
+                        MODEL_REGISTRY=MODEL_REGISTRY,
                         monthly_clients_lookup=client_predictions_lookup.get(
                             f"Activity_{activity}", {}
                         ),
                     )
-
-                    # store monthly forecasts for later aggregation
-                    if "monthly_forecasts" in res:
-                        client_predictions_lookup[entity_name] = {
-                            y: np.array(m)
-                            for y, m in zip(
-                                [y for y, _ in res["horizon_predictions"]],
-                                res["monthly_forecasts"],
-                            )
-                        }
 
                     forecast_years = [y for y, _ in res["horizon_predictions"]]
                     pred_annual = [float(v) for _, v in res["horizon_predictions"]]
@@ -615,20 +346,11 @@ if __name__ == "__main__":
                         df_features=df_features,
                         df_monthly=df_bt_agg,
                         config=config,
+                        MODEL_REGISTRY=MODEL_REGISTRY,
                         monthly_clients_lookup=client_predictions_lookup.get(
                             "Aggregated_BT", {}
                         ),
                     )
-
-                    # Update aggregated lookup
-                    if "monthly_forecasts" in res:
-                        client_predictions_lookup["Aggregated_BT"] = {
-                            y: np.array(m)
-                            for y, m in zip(
-                                [y for y, _ in res["horizon_predictions"]],
-                                res["monthly_forecasts"],
-                            )
-                        }
 
                     forecast_years = [y for y, _ in res["horizon_predictions"]]
                     pred_annual = [float(v) for _, v in res["horizon_predictions"]]
@@ -693,19 +415,11 @@ if __name__ == "__main__":
                         df_features=df_features,
                         df_monthly=df_mt_agg,
                         config=config,
+                        MODEL_REGISTRY=MODEL_REGISTRY,
                         monthly_clients_lookup=client_predictions_lookup.get(
                             "Aggregated_MT", {}
                         ),
                     )
-
-                    if "monthly_forecasts" in res:
-                        client_predictions_lookup["Aggregated_MT"] = {
-                            y: np.array(m)
-                            for y, m in zip(
-                                [y for y, _ in res["horizon_predictions"]],
-                                res["monthly_forecasts"],
-                            )
-                        }
 
                     forecast_years = [y for y, _ in res["horizon_predictions"]]
                     pred_annual = [float(v) for _, v in res["horizon_predictions"]]
@@ -749,7 +463,7 @@ if __name__ == "__main__":
                     .reset_index()
                     .rename(columns={reg_var_col: config.general_params.variable})
                 )
-
+                df_total_regional = fill_2020_with_avg(df_total_regional, reg_var_col)
                 aggregate_predictions(
                     client_predictions_lookup,
                     "Total_Regional",
@@ -766,21 +480,15 @@ if __name__ == "__main__":
                     monthly_matrix=monthly_matrix,
                     years=years,
                     df_features=df_features,
-                    df_monthly=df_regional,
+                    df_monthly=df_total_regional,
                     config=config,
+                    MODEL_REGISTRY=MODEL_REGISTRY,
                     monthly_clients_lookup=client_predictions_lookup.get(
                         "Total_Regional", {}
                     ),
+                    region_entity = f"{TARGET_REGION} - TOTAL REGIONAL",
+                    save_folder=output_dir,
                 )
-
-                if "monthly_forecasts" in res:
-                    client_predictions_lookup["Total_Regional"] = {
-                        y: np.array(m)
-                        for y, m in zip(
-                            [y for y, _ in res["horizon_predictions"]],
-                            res["monthly_forecasts"],
-                        )
-                    }
 
                 forecast_years = [y for y, _ in res["horizon_predictions"]]
                 pred_annual = [float(v) for _, v in res["horizon_predictions"]]
@@ -816,7 +524,7 @@ if __name__ == "__main__":
             # ────────────────────────────────────────────────────────────────
             # LEVEL 5–7: DISTRIBUTORS + SRM
             # ────────────────────────────────────────────────────────────────
-            if df_dist is not None:
+            if len(df_dist) >= 1:
                 # Level 5: Individual Distributors
                 if 5 in RUN_LEVELS:
                     print(f"\n{'#'*60}\nLEVEL 5: INDIVIDUAL DISTRIBUTORS\n{'#'*60}")
@@ -827,6 +535,9 @@ if __name__ == "__main__":
                             ]
                             .copy()
                             .rename(columns={dist_var_col: config.general_params.variable})
+                        )
+                        df_distributor = fill_2020_with_avg(
+                            df_distributor, dist_var_col
                         )
                         df_train = df_distributor[df_distributor["annee"] <= train_end]
                         monthly_matrix = create_monthly_matrix(
@@ -840,20 +551,11 @@ if __name__ == "__main__":
                             df_features=df_features,
                             df_monthly=df_distributor,
                             config=config,
+                            MODEL_REGISTRY=MODEL_REGISTRY,
                             monthly_clients_lookup=client_predictions_lookup.get(
                                 f"Distributor_{distributor}", {}
                             ),
                         )
-
-                        entity_name = f"Distributor_{distributor}"
-                        if "monthly_forecasts" in res:
-                            client_predictions_lookup[entity_name] = {
-                                y: np.array(m)
-                                for y, m in zip(
-                                    [y for y, _ in res["horizon_predictions"]],
-                                    res["monthly_forecasts"],
-                                )
-                            }
 
                         forecast_years = [y for y, _ in res["horizon_predictions"]]
                         pred_annual = [float(v) for _, v in res["horizon_predictions"]]
@@ -876,7 +578,7 @@ if __name__ == "__main__":
                             {
                                 "region": TARGET_REGION,
                                 "mode": mode,
-                                "level": entity_name,
+                                "level": f"Distributor_{distributor}",
                                 "forecast_years": forecast_years,
                                 "pred_annual": pred_annual,
                                 "pred_monthly": res["monthly_forecasts"],
@@ -903,6 +605,7 @@ if __name__ == "__main__":
                         .reset_index()
                         .rename(columns={dist_var_col: config.general_params.variable})
                     )
+                    df_all_dist = fill_2020_with_avg(df_all_dist, dist_var_col)
                     df_train = df_all_dist[df_all_dist["annee"] <= train_end]
                     monthly_matrix = create_monthly_matrix(
                         df_train, value_col=config.general_params.variable
@@ -915,9 +618,12 @@ if __name__ == "__main__":
                         df_features=df_features,
                         df_monthly=df_all_dist,
                         config=config,
+                        MODEL_REGISTRY=MODEL_REGISTRY,
                         monthly_clients_lookup=client_predictions_lookup.get(
                             "All_Distributors", {}
                         ),
+                        region_entity = f"{TARGET_REGION} - ALL DISTRIBUTORS COMBINED",
+                        save_folder=output_dir
                     )
 
                     forecast_years = [y for y, _ in res["horizon_predictions"]]
@@ -979,6 +685,8 @@ if __name__ == "__main__":
                         .agg({config.general_params.variable: "sum"})
                         .reset_index()
                     )
+                    # df_srm = fill_2020_with_avg(df_srm, config.general_params.variable)
+                    df_srm = df_srm[df_srm["annee"] >= 2013]
                     df_train = df_srm[df_srm["annee"] <= train_end]
                     monthly_matrix = create_monthly_matrix(
                         df_train, value_col=config.general_params.variable
@@ -991,9 +699,12 @@ if __name__ == "__main__":
                         df_features=df_features,
                         df_monthly=df_srm,
                         config=config,
+                        MODEL_REGISTRY=MODEL_REGISTRY,
                         monthly_clients_lookup=client_predictions_lookup.get(
                             "SRM_Regional_Plus_Dist", {}
                         ),
+                        region_entity = f"{TARGET_REGION} - SRM (Regional + Distributors)",
+                        save_folder=output_dir
                     )
 
                     forecast_years = [y for y, _ in res["horizon_predictions"]]
@@ -1030,13 +741,6 @@ if __name__ == "__main__":
         # ────────────────────────────────────────────────────────────────
         # OUTPUTS
         # ────────────────────────────────────────────────────────────────
-        output_dir = (
-            config.general_params.project_root
-            / "outputs_horizon"
-            / f"{config.general_params.exp_name}"
-            / clean_name(TARGET_REGION)
-        )
-        output_dir.mkdir(parents=True, exist_ok=True)
 
         with open(
             output_dir
