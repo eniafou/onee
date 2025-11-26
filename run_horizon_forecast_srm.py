@@ -57,6 +57,7 @@ class GeneralParams(BaseModel):
     model_classes: List[str] = Field(
         default_factory=lambda: ["GaussianProcessForecastModel"] # "GaussianProcessForecastModel", "MeanRevertingGrowthModelARP", "MeanRevertingGrowthModel", "PCAMeanRevertingGrowthModel", "RawMeanRevertingGrowthModel", "LocalInterpolationForecastModel", "AsymmetricAdaptiveTrendModel", ""
     )
+    impute_2020: bool = False
 
 
 class FeatureBuildingGrid(BaseModel):
@@ -148,7 +149,7 @@ if __name__ == "__main__":
     config = ForecastConfig(
         general_params=GeneralParams(
             project_root=Path(__file__).resolve().parents[0],
-            exp_name="new_gaussian_interplolation_3",
+            exp_name="gp_2018_1_forced_growth",
             horizon=5
         )
     )
@@ -173,7 +174,7 @@ if __name__ == "__main__":
 
     forecast_types = {
         # "forward": (2007, 2023),
-        "backtest": (2007, 2021),
+        "backtest": (2007, 2018),
     }
 
     for TARGET_REGION in REGIONS:
@@ -263,7 +264,9 @@ if __name__ == "__main__":
                         .copy()
                         .rename(columns={reg_var_col: config.general_params.variable})
                     )
-                    df_activity = fill_2020_with_avg(df_activity, reg_var_col)
+                    if config.general_params.impute_2020:
+                        df_activity = fill_2020_with_avg(df_activity, reg_var_col)
+
                     df_train = df_activity[df_activity["annee"] <= train_end]
                     monthly_matrix = create_monthly_matrix(
                         df_train, value_col=config.general_params.variable
@@ -463,7 +466,8 @@ if __name__ == "__main__":
                     .reset_index()
                     .rename(columns={reg_var_col: config.general_params.variable})
                 )
-                df_total_regional = fill_2020_with_avg(df_total_regional, reg_var_col)
+                if config.general_params.impute_2020:
+                    df_total_regional = fill_2020_with_avg(df_total_regional, reg_var_col)
                 aggregate_predictions(
                     client_predictions_lookup,
                     "Total_Regional",
@@ -536,9 +540,10 @@ if __name__ == "__main__":
                             .copy()
                             .rename(columns={dist_var_col: config.general_params.variable})
                         )
-                        df_distributor = fill_2020_with_avg(
-                            df_distributor, dist_var_col
-                        )
+                        if config.general_params.impute_2020:
+                            df_distributor = fill_2020_with_avg(
+                                df_distributor, dist_var_col
+                            )
                         df_train = df_distributor[df_distributor["annee"] <= train_end]
                         monthly_matrix = create_monthly_matrix(
                             df_train, value_col=config.general_params.variable
@@ -605,7 +610,8 @@ if __name__ == "__main__":
                         .reset_index()
                         .rename(columns={dist_var_col: config.general_params.variable})
                     )
-                    df_all_dist = fill_2020_with_avg(df_all_dist, dist_var_col)
+                    if config.general_params.impute_2020:
+                        df_all_dist = fill_2020_with_avg(df_all_dist, dist_var_col)
                     df_train = df_all_dist[df_all_dist["annee"] <= train_end]
                     monthly_matrix = create_monthly_matrix(
                         df_train, value_col=config.general_params.variable
@@ -685,7 +691,10 @@ if __name__ == "__main__":
                         .agg({config.general_params.variable: "sum"})
                         .reset_index()
                     )
-                    # df_srm = fill_2020_with_avg(df_srm, config.general_params.variable)
+
+                    # if config.general_params.impute_2020:
+                    #     df_srm = fill_2020_with_avg(df_srm, config.general_params.variable)
+
                     df_srm = df_srm[df_srm["annee"] >= 2013]
                     df_train = df_srm[df_srm["annee"] <= train_end]
                     monthly_matrix = create_monthly_matrix(

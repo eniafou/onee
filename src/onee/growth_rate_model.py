@@ -422,7 +422,7 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
         "random_state"
     ]
 
-    def __init__(self, kernel=None, alpha=1e-10, n_restarts_optimizer=10, normalize_y=True, random_state=42):
+    def __init__(self, kernel=None, alpha=1e-10, n_restarts_optimizer=10, normalize_y=True, random_state=42, use_log_transform=True):
         """
         GPR Model for probabilistic extrapolation.
         
@@ -445,54 +445,67 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
             "alpha": alpha,
             "n_restarts_optimizer": n_restarts_optimizer,
             "normalize_y": normalize_y,
-            "random_state": random_state
+            "random_state": random_state,
+            "use_log_transform": use_log_transform
         }
         
-        # Internal state
+        # Internal Model State
         self.model = None
+        self.fitted_params = {}
+        
+        # Data State
         self.train_years = None
         self.train_y = None
-        self.train_X = None
+        
+        # Scaling State (CRITICAL for fixing exploding intervals)
         self.scaler_x = StandardScaler()
-        self.fitted_params = {}
+        self.train_features_scaled = None
 
-    def fit(self, *, y: Optional[np.ndarray] = None, monthly_matrix: Optional[np.ndarray] = None, 
-            years: Optional[np.ndarray] = None, X: Optional[np.ndarray] = None, **kwargs) -> "GaussianProcessForecastModel":
-        
-        # 1. Validation
+    def fit(self, *, y: Optional[np.ndarray] = None, years: Optional[np.ndarray] = None, X: Optional[np.ndarray] = None, **kwargs):
         if y is None or years is None:
-            raise ValueError("GaussianProcessForecastModel requires 'y' and 'years' to be provided.")
+            raise ValueError("GaussianProcessForecastModel requires 'y' and 'years'.")
         
-        # 2. Prepare Data
-        # We combine Year + X into a single feature matrix. 
-        # GPR requires 2D arrays (N_samples, N_features)
-        X_years = np.array(years).reshape(-1, 1)
-        
-        if X is not None:
-            # Concatenate Year and Exogenous features
-            if X.ndim == 1:
-                X = X.reshape(-1, 1)
-            self.train_features = np.hstack([X_years, X])
+        # 1. Transform Target Variable (Exponential Logic)
+        if self.hyper_params["use_log_transform"]:
+            # We use log1p to be safe against zeros (log(1+x))
+            # If your data is large (10^12), standard log is fine, but log1p is generally safer.
+            if np.any(y <= 0):
+                raise ValueError("Log transform requires strictly positive y (or non-negative for log1p).")
+            self.train_y_transformed = np.log(y)
         else:
-            self.train_features = X_years
+            self.train_y_transformed = y
+
+        # 1. Build Unified Feature Matrix (Years + Exogenous)
+        X_years = np.array(years).reshape(-1, 1)
+
+        if X is not None:
+             if X.ndim == 1: X = X.reshape(-1, 1)
+             X_full = np.hstack([X_years, X])
+        else:
+             X_full = X_years
+
+        # 2. Unified Scaling
+        # Use a single scaler for the entire matrix to ensure consistency
+        self.scaler = StandardScaler()
+        self.train_features_scaled = self.scaler.fit_transform(X_full)
 
         self.train_years = years
         self.train_y = y
-        
-        # 3. Define Default Kernel if None provided
-        # Combination: Linear Trend (DotProduct) + Nonlinear Wiggles (RBF) + Noise (White)
+
+        # 3. Kernel Definition
+        # Defaulting to Matern + WhiteKernel to prevent exploding extrapolation
         if self.hyper_params["kernel"] is None:
-            kernel = (C(1.0) * RBF(length_scale=1.0, length_scale_bounds=(1e-1, 10.0)) + 
-                      DotProduct(sigma_0=1.0) + 
-                      WhiteKernel(noise_level=1.0))
+            # RBF(length_scale=1.0, length_scale_bounds=(1e-1, 10.0))
             # kernel = (
             #     C(1.0, (1e-3, 1e3)) * Matern(length_scale=1.0, length_scale_bounds=(1e-2, 1e2), nu=1.5) + 
             #     WhiteKernel(noise_level=1.0, noise_level_bounds=(1e-5, 1e1))
             # )
+            kernel = (C(1.0) * Matern(length_scale=1.0, length_scale_bounds=(1e-2, 1e2), nu=1.5) + 
+                      DotProduct(sigma_0=1.0) + 
+                      WhiteKernel(noise_level=1.0))
         else:
             kernel = self.hyper_params["kernel"]
 
-        # 4. Instantiate Scikit-Learn Model
         self.model = GaussianProcessRegressor(
             kernel=kernel,
             alpha=self.hyper_params["alpha"],
@@ -501,26 +514,30 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
             random_state=self.hyper_params["random_state"]
         )
 
-        # 5. Fit
-        self.model.fit(self.train_features, y)
+        self.model.fit(self.train_features_scaled, self.train_y_transformed)
         
-        # 6. Store Fitted Parameters
         self.fitted_params = {
             "learned_kernel": str(self.model.kernel_),
-            "log_marginal_likelihood": self.model.log_marginal_likelihood()
+            "log_marginal_likelihood": float(self.model.log_marginal_likelihood())
         }
         
         return self
 
     def predict(self, X_next: Optional[np.ndarray] = None) -> float:
-        """
-        Simple one-step prediction (Mean only).
-        """
         if self.model is None:
             raise RuntimeError("Model must be fitted before calling predict()")
-            
-        prediction = self.model.predict(np.array(X_next).reshape(1, -1))
-        return float(prediction[0])
+        
+        # Scale input using the unified scaler
+        # X_next must match the shape [Years, Exog] used in fit
+        X_next = np.array(X_next).reshape(1, -1)
+        X_scaled = self.scaler.transform(X_next)
+
+        pred = self.model.predict(X_scaled)
+
+        if self.hyper_params["use_log_transform"]:
+            return float(np.exp(pred[0]))
+        
+        return float(pred[0])
 
     def forecast_horizon(
         self, 
@@ -531,69 +548,62 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
         feature_config: dict, 
         monthly_clients_lookup=None
     ) -> List[Tuple[int, float, float, float]]:
-        """
-        Vectorized forecast generation with Confidence Intervals and Exogenous Features.
-        Returns: [(Year, Mean, Lower_95, Upper_95), ...]
-        """
-        # 1. Define the future timeline
+        
         future_years = np.arange(start_year + 1, start_year + 1 + horizon)
         
-        # 2. Construct the Exogenous Features (X part)
-        # We unwrap the feature_config dictionary to pass arguments to the builder
+        # 1. Build Exogenous Features
         X_exog = build_growth_rate_features(
             years=future_years,
+            feature_block=feature_config.get("feature_block", []),
             df_features=df_features,
             clients_lookup=monthly_clients_lookup,
+            use_clients=feature_config.get("use_clients", False),
             df_monthly=df_monthly,
-            **feature_config
-            
+            use_pf=feature_config.get("use_pf", False),
+            transforms=feature_config.get("transforms", ("lag_lchg",)),
+            lags=feature_config.get("lags", (1,))
         )
-    
-        # 3. Construct the Time Features (Year part)
-        # GPR expects 2D array: (n_samples, n_features)
-        X_years = future_years.reshape(-1, 1)
 
-        # 4. Combine Time + Exogenous Features
-        # The structure must match exactly how self.train_features was built in fit()
+        # 2. Build Unified Matrix
+        X_years = future_years.reshape(-1, 1)
+        
         if X_exog is not None and X_exog.size > 0:
             X_full = np.hstack([X_years, X_exog])
         else:
             X_full = X_years
 
-        # 5. Safety Check: Dimension Consistency
-        # The model was trained on N columns. The forecast input must have N columns.
-        expected_cols = self.train_features.shape[1]
-        actual_cols = X_full.shape[1]
-        
-        if actual_cols != expected_cols:
+        # 3. Scale using the Unified Scaler
+        try:
+            X_scaled = self.scaler.transform(X_full)
+        except ValueError as e:
             raise ValueError(
-                f"Feature dimension mismatch. Model was trained on {expected_cols} features "
-                f"(Years + Exog), but forecast generation produced {actual_cols} features. "
-                f"Check 'feature_config' or data availability for future years."
-            )
+                f"Feature dimension mismatch. Model expects {self.scaler.n_features_in_} features "
+                f"(Years + Exog), but forecast generated {X_full.shape[1]} features."
+            ) from e
 
-        # 6. GPR Predict with Standard Deviation
-        y_mean, y_std = self.model.predict(X_full, return_std=True)
+        # 4. Predict
+        y_mean, y_std = self.model.predict(X_scaled, return_std=True)
         
-        # 7. Calculate 95% Confidence Intervals
-        # 1.96 * sigma covers 95% of the normal distribution
-        lower_bound = y_mean - 1.96 * y_std
-        upper_bound = y_mean + 1.96 * y_std
-        
-        # 8. Format Output
         results = []
         for i, year in enumerate(future_years):
-            # Ensure native Python types for JSON serialization/logging later
-            results.append((
-                int(year), 
-                float(y_mean[i]), 
-                float(lower_bound[i]), 
-                float(upper_bound[i])
-            ))
+            if self.hyper_params["use_log_transform"]:
+                # The model predicted log(y). The error is in log-units.
+                # CI_log = Mean_log +/- 1.96 * Std_log
+                log_lower = y_mean[i] - 1.96 * y_std[i]
+                log_upper = y_mean[i] + 1.96 * y_std[i]
+                
+                # Transform back to Real Units
+                final_mean = np.exp(y_mean[i])
+                final_lower = np.exp(log_lower)
+                final_upper = np.exp(log_upper)
+            else:
+                final_mean = y_mean[i]
+                final_lower = y_mean[i] - 1.96 * y_std[i]
+                final_upper = y_mean[i] + 1.96 * y_std[i]
+            
+            results.append((int(year), float(final_mean), float(final_lower), float(final_upper)))
             
         return results
-    
-    
     def get_params(self) -> Dict:
         return {
             "hyper_params": self.hyper_params,
