@@ -419,10 +419,12 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
         "alpha", 
         "n_restarts_optimizer", 
         "normalize_y", 
-        "random_state"
+        "random_state",
+        "use_log_transform",
+        "min_annual_growth"
     ]
 
-    def __init__(self, kernel=None, alpha=1e-10, n_restarts_optimizer=10, normalize_y=True, random_state=42, use_log_transform=True):
+    def __init__(self, kernel=None, alpha=1e-10, n_restarts_optimizer=10, normalize_y=True, random_state=42, use_log_transform=True, min_annual_growth=0.02, local_intercept=True):
         """
         GPR Model for probabilistic extrapolation.
         
@@ -446,20 +448,23 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
             "n_restarts_optimizer": n_restarts_optimizer,
             "normalize_y": normalize_y,
             "random_state": random_state,
-            "use_log_transform": use_log_transform
+            "use_log_transform": use_log_transform,
+            "min_annual_growth": min_annual_growth,
+            "local_intercept": local_intercept
         }
         
         # Internal Model State
         self.model = None
         self.fitted_params = {}
+        self.prior_model = None
+        self.prior_slope = None
+        self.prior_intercept = None
+        self.scaler_x = StandardScaler()
         
         # Data State
         self.train_years = None
         self.train_y = None
-        
-        # Scaling State (CRITICAL for fixing exploding intervals)
-        self.scaler_x = StandardScaler()
-        self.train_features_scaled = None
+                
 
     def fit(self, *, y: Optional[np.ndarray] = None, years: Optional[np.ndarray] = None, X: Optional[np.ndarray] = None, **kwargs):
         if y is None or years is None:
@@ -467,42 +472,76 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
         
         # 1. Transform Target Variable (Exponential Logic)
         if self.hyper_params["use_log_transform"]:
-            # We use log1p to be safe against zeros (log(1+x))
-            # If your data is large (10^12), standard log is fine, but log1p is generally safer.
             if np.any(y <= 0):
                 raise ValueError("Log transform requires strictly positive y (or non-negative for log1p).")
-            self.train_y_transformed = np.log(y)
+            y_transformed = np.log(y)
         else:
-            self.train_y_transformed = y
-
-        # 1. Build Unified Feature Matrix (Years + Exogenous)
-        X_years = np.array(years).reshape(-1, 1)
-
-        if X is not None:
-             if X.ndim == 1: X = X.reshape(-1, 1)
-             X_full = np.hstack([X_years, X])
-        else:
-             X_full = X_years
-
-        # 2. Unified Scaling
-        # Use a single scaler for the entire matrix to ensure consistency
-        self.scaler = StandardScaler()
-        self.train_features_scaled = self.scaler.fit_transform(X_full)
+            y_transformed = y
 
         self.train_years = years
         self.train_y = y
 
+        # --- STEP 2: The Growth Floor (Prior) ---
+        # We fit a simple line on Time vs Log(Y) to find the historical slope
+        # We use Raw Years here so the slope is in "Per Year" units
+        X_years_raw = np.array(years).reshape(-1, 1)
+        
+        lr = LinearRegression()
+        lr.fit(X_years_raw, y_transformed)
+        
+        raw_slope = lr.coef_[0]
+        forced_slope = max(raw_slope, self.hyper_params["min_annual_growth"])
+
+        if self.hyper_params["local_intercept"]:
+            anchor_window = 3  # Look at the last 3 years (Hyperparameter candidate?)
+            
+            # Safety check: don't crash if we have fewer than 3 points
+            valid_window = min(anchor_window, len(y_transformed))
+            
+            # Slice the last N points
+            recent_y_mean = np.mean(y_transformed[-valid_window:])
+            recent_x_mean = np.mean(X_years_raw[-valid_window:])
+            
+            # Re-Calculate Intercept:
+            # We force the line (with the forced slope) to pass through the recent average.
+            forced_intercept = recent_y_mean - (forced_slope * recent_x_mean)
+        else:
+            # Re-calculate intercept to pivot around the center of mass
+            # y = mx + c  ->  c = mean(y) - m * mean(x)
+            mean_y = np.mean(y_transformed)
+            mean_x = np.mean(X_years_raw)
+            forced_intercept = mean_y - (forced_slope * mean_x)
+        
+        # Store the "Prior" manually
+        self.prior_slope = forced_slope
+        self.prior_intercept = forced_intercept
+        
+        # Calculate the "Deterministic Trend" component
+        trend_values = (self.prior_slope * X_years_raw.flatten()) + self.prior_intercept
+        
+        # Calculate Residuals (This is what the GP will actually learn)
+        # If the data dipped, residuals will be negative.
+        residuals = y_transformed - trend_values
+
+        if X is not None:
+             if X.ndim == 1: X = X.reshape(-1, 1)
+             X_full = np.hstack([X_years_raw, X])
+        else:
+             X_full = X_years_raw
+
+        # 2. Unified Scaling
+        # Use a single scaler for the entire matrix to ensure consistency
+        self.scaler = StandardScaler()
+        X_scaled = self.scaler.fit_transform(X_full)
+
+
         # 3. Kernel Definition
         # Defaulting to Matern + WhiteKernel to prevent exploding extrapolation
         if self.hyper_params["kernel"] is None:
-            # RBF(length_scale=1.0, length_scale_bounds=(1e-1, 10.0))
-            # kernel = (
-            #     C(1.0, (1e-3, 1e3)) * Matern(length_scale=1.0, length_scale_bounds=(1e-2, 1e2), nu=1.5) + 
-            #     WhiteKernel(noise_level=1.0, noise_level_bounds=(1e-5, 1e1))
-            # )
-            kernel = (C(1.0) * Matern(length_scale=1.0, length_scale_bounds=(1e-2, 1e2), nu=1.5) + 
-                      DotProduct(sigma_0=1.0) + 
-                      WhiteKernel(noise_level=1.0))
+            kernel = (
+                C(1.0, (1e-2, 1e3)) * RBF(length_scale=3.0, length_scale_bounds=(2.0, 6.0)) + 
+                WhiteKernel(noise_level=0.1, noise_level_bounds=(1e-5, 0.5))
+            )
         else:
             kernel = self.hyper_params["kernel"]
 
@@ -514,11 +553,13 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
             random_state=self.hyper_params["random_state"]
         )
 
-        self.model.fit(self.train_features_scaled, self.train_y_transformed)
+        self.model.fit(X_scaled, residuals)
         
         self.fitted_params = {
             "learned_kernel": str(self.model.kernel_),
-            "log_marginal_likelihood": float(self.model.log_marginal_likelihood())
+            "log_marginal_likelihood": float(self.model.log_marginal_likelihood()),
+            "forced_slope": float(self.prior_slope),
+            "original_slope": float(raw_slope)
         }
         
         return self
@@ -527,17 +568,21 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
         if self.model is None:
             raise RuntimeError("Model must be fitted before calling predict()")
         
-        # Scale input using the unified scaler
-        # X_next must match the shape [Years, Exog] used in fit
         X_next = np.array(X_next).reshape(1, -1)
-        X_scaled = self.scaler.transform(X_next)
+        year_val = X_next[0, 0] # Assume 1st col is Year
+        
+        # 1. Predict Trend
+        trend_val = (self.prior_slope * year_val) + self.prior_intercept
 
-        pred = self.model.predict(X_scaled)
+        X_scaled = self.scaler.transform(X_next)
+        resid_val = self.model.predict(X_scaled)[0]
+
+        final_pred = trend_val + resid_val
 
         if self.hyper_params["use_log_transform"]:
-            return float(np.exp(pred[0]))
+            return float(np.exp(final_pred))
         
-        return float(pred[0])
+        return float(final_pred)
 
     def forecast_horizon(
         self, 
@@ -554,11 +599,11 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
         # 1. Build Exogenous Features
         X_exog = build_growth_rate_features(
             years=future_years,
-            feature_block=feature_config.get("feature_block", []),
             df_features=df_features,
             clients_lookup=monthly_clients_lookup,
-            use_clients=feature_config.get("use_clients", False),
             df_monthly=df_monthly,
+            use_clients=feature_config.get("use_clients", False),
+            feature_block=feature_config.get("feature_block", []),
             use_pf=feature_config.get("use_pf", False),
             transforms=feature_config.get("transforms", ("lag_lchg",)),
             lags=feature_config.get("lags", (1,))
@@ -582,24 +627,29 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
             ) from e
 
         # 4. Predict
-        y_mean, y_std = self.model.predict(X_scaled, return_std=True)
+        resid_mean, resid_std = self.model.predict(X_scaled, return_std=True)
         
+        trend_vals = (self.prior_slope * future_years) + self.prior_intercept
+
         results = []
         for i, year in enumerate(future_years):
+            y_mean = trend_vals[i] + resid_mean[i]
+            y_std = resid_std[i] # The trend is deterministic, so uncertainty comes only from GP
+            
             if self.hyper_params["use_log_transform"]:
                 # The model predicted log(y). The error is in log-units.
                 # CI_log = Mean_log +/- 1.96 * Std_log
-                log_lower = y_mean[i] - 1.96 * y_std[i]
-                log_upper = y_mean[i] + 1.96 * y_std[i]
+                log_lower = y_mean - 1.96 * y_std
+                log_upper = y_mean + 1.96 * y_std
                 
                 # Transform back to Real Units
-                final_mean = np.exp(y_mean[i])
+                final_mean = np.exp(y_mean)
                 final_lower = np.exp(log_lower)
                 final_upper = np.exp(log_upper)
             else:
-                final_mean = y_mean[i]
-                final_lower = y_mean[i] - 1.96 * y_std[i]
-                final_upper = y_mean[i] + 1.96 * y_std[i]
+                final_mean = y_mean
+                final_lower = y_mean - 1.96 * y_std
+                final_upper = y_mean + 1.96 * y_std
             
             results.append((int(year), float(final_mean), float(final_lower), float(final_upper)))
             
@@ -621,16 +671,7 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
         target_col: str = "consommation_kwh"
     ):
         """
-        Visualizes the forecast and optionally compares it against actuals derived 
-        directly from monthly data.
-
-        Parameters
-        ----------
-        df_monthly : pd.DataFrame, optional
-            Raw monthly data containing 'annee' and 'target_col'. 
-            If provided, it will be aggregated (Sum) to create annual ground truth.
-        target_col : str
-            The name of the value column in df_monthly to sum up (default: 'valeur').
+        Visualizes the forecast, confidence intervals, actuals, AND the underlying Growth Trend.
         """
         import os
         import re
@@ -645,33 +686,41 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
 
         # 1. Plot History (Training Data)
         plt.scatter(self.train_years, self.train_y, color='black', s=40, label='Historical Data', zorder=5)
-        plt.plot(self.train_years, self.train_y, color='black', linestyle=':', alpha=0.3)
-
+        
         # 2. Plot Forecast Mean
         plt.plot(f_years, f_mean, color='blue', linewidth=2, label='Forecast (Mean)', zorder=4)
 
         # 3. Plot Confidence Intervals
         plt.fill_between(f_years, f_lower, f_upper, color='blue', alpha=0.15, label='95% Confidence Interval', zorder=1)
 
-        # 4. Logic to Prepare Actuals (Ground Truth)
-        ground_truth_map = {}
-        
-        if df_monthly is not None:
-            if target_col not in df_monthly.columns or "annee" not in df_monthly.columns:
-                print(f"Warning: df_monthly is missing '{target_col}' or 'annee'. Skipping actuals plot.")
+        # --- NEW: Plot the "Growth Floor" (The Forced Trend) ---
+        # This helps you see if the model is respecting your min_annual_growth
+        if hasattr(self, 'prior_slope') and self.prior_slope is not None:
+            # Create a timeline covering history + forecast
+            full_timeline = np.concatenate([self.train_years, f_years])
+            full_timeline_sorted = np.sort(np.unique(full_timeline))
+            
+            # Calculate the linear trend (in Log space usually)
+            trend_values_log = (self.prior_slope * full_timeline_sorted) + self.prior_intercept
+            
+            # Convert back to real space if needed
+            if self.hyper_params.get("use_log_transform", False):
+                trend_values = np.exp(trend_values_log)
             else:
-                # Group by Year and Sum
+                trend_values = trend_values_log
+                
+            plt.plot(full_timeline_sorted, trend_values, color='gray', linestyle='--', alpha=0.5, label=f'Growth Floor ({self.prior_slope:.1%} slope)')
+
+        # 4. Plot Actuals
+        ground_truth_map = {}
+        if df_monthly is not None:
+            if target_col in df_monthly.columns and "annee" in df_monthly.columns:
                 annual_agg = df_monthly.groupby("annee")[target_col].sum()
                 ground_truth_map = annual_agg.to_dict()
 
-        # 5. Plot Actuals
         if ground_truth_map:
-            # We only plot actuals that overlap with the FORECAST range 
-            # (to check accuracy), or you can plot all to see the full picture.
-            # Here we plot ANY actuals that exist in the forecast range.
             act_years = []
             act_values = []
-            
             for y in f_years:
                 if y in ground_truth_map:
                     act_years.append(y)
@@ -689,7 +738,7 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
         plt.grid(True, alpha=0.4)
         plt.tight_layout()
 
-        # 6. Saving Logic
+        # 5. Saving Logic
         if save_plot:
             if not os.path.exists(save_folder):
                 os.makedirs(save_folder)
@@ -703,7 +752,6 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
             print(f"Plot saved to: {file_path}")
 
         plt.show()
-
 
 
 

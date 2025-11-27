@@ -2,7 +2,7 @@
 # run_horizon_forecast_srm.py (Clean + Correct)
 # ─────────────────────────────────────────────────────────────
 
-from onee.growth_rate_model import MeanRevertingGrowthModelARP, MeanRevertingGrowthModel, PCAMeanRevertingGrowthModel, RawMeanRevertingGrowthModel, LocalInterpolationForecastModel, AsymmetricAdaptiveTrendModel, FullyAdaptiveTrendModel
+from onee.growth_rate_model import MeanRevertingGrowthModelARP, MeanRevertingGrowthModel, PCAMeanRevertingGrowthModel, RawMeanRevertingGrowthModel, LocalInterpolationForecastModel, AsymmetricAdaptiveTrendModel, FullyAdaptiveTrendModel, GaussianProcessForecastModel
 from forecast_strategies import (
     create_monthly_matrix,
 )
@@ -38,7 +38,8 @@ MODEL_REGISTRY = {
     "RawMeanRevertingGrowthModel": RawMeanRevertingGrowthModel,
     "LocalInterpolationForecastModel": LocalInterpolationForecastModel,
     "AsymmetricAdaptiveTrendModel": AsymmetricAdaptiveTrendModel,
-    "FullyAdaptiveTrendModel": FullyAdaptiveTrendModel
+    "FullyAdaptiveTrendModel": FullyAdaptiveTrendModel,
+    "GaussianProcessForecastModel": GaussianProcessForecastModel,
 }
 
 class GeneralParams(BaseModel):
@@ -49,7 +50,7 @@ class GeneralParams(BaseModel):
     unit: str = "Kwh"
     r2_threshold: float = 0.6
     model_classes: List[str] = Field(
-        default_factory=lambda: ["FullyAdaptiveTrendModel"] # "MeanRevertingGrowthModelARP", "MeanRevertingGrowthModel", "PCAMeanRevertingGrowthModel", "RawMeanRevertingGrowthModel", "LocalInterpolationForecastModel", "AsymmetricAdaptiveTrendModel", "FullyAdaptiveTrendModel"
+        default_factory=lambda: ["GaussianProcessForecastModel"] # "MeanRevertingGrowthModelARP", "MeanRevertingGrowthModel", "PCAMeanRevertingGrowthModel", "RawMeanRevertingGrowthModel", "LocalInterpolationForecastModel", "AsymmetricAdaptiveTrendModel", "FullyAdaptiveTrendModel"
     )
 
 
@@ -74,7 +75,6 @@ class FeatureBuildingGrid(BaseModel):
 
 
 class ModelHyperparameterGrid(BaseModel):
-    
     # Shared parameters across both models
     include_ar: List[bool] = Field(default_factory=lambda: [True])
     include_exog: List[bool] = Field(default_factory=lambda: [True])
@@ -151,7 +151,7 @@ if __name__ == "__main__":
     config = ForecastConfig(
         general_params=GeneralParams(
             project_root=Path(__file__).resolve().parents[0],
-            exp_name="distributers_activities_3",
+            exp_name="gp_1",
             horizon=5
         )
     )
@@ -162,7 +162,7 @@ if __name__ == "__main__":
 
     forecast_types = {
         # "forward": (2007, 2023),
-        "backtest": (2007, 2021),
+        "backtest": (2007, 2018),
     }
 
     
@@ -199,6 +199,13 @@ if __name__ == "__main__":
         print(
             f"\n🧭 MODE: {mode.upper()} — training {train_start}→{train_end}, horizon={config.general_params.horizon}"
         )
+
+        output_dir = (
+            config.general_params.project_root
+            / "outputs_horizon_cd"
+            / f"{config.general_params.exp_name}"
+        )
+        output_dir.mkdir(parents=True, exist_ok=True)
 
         # ────────────────────────────────────────────────────────────────
         # LEVEL 1: INDIVIDUAL ACTIVITIES
@@ -285,7 +292,7 @@ if __name__ == "__main__":
             print(f"{'#'*60}")
 
             activites = sorted(df_contrats['activite'].unique())
-            activites = ["ADMINISTRATION PUBLIQUE"]
+            # activites = ["ADMINISTRATION PUBLIQUE"]
 
             established_activites = []
             growth_activites = []
@@ -339,6 +346,8 @@ if __name__ == "__main__":
                     df_monthly=df_activite,
                     config=config,
                     MODEL_REGISTRY=MODEL_REGISTRY,
+                    region_entity = f"CD - activité {activite}",
+                    save_folder=output_dir / f"{activite}",
                 )
                 
                 forecast_years = [y for y, _ in res["horizon_predictions"]]
@@ -383,13 +392,6 @@ if __name__ == "__main__":
     # ────────────────────────────────────────────────────────────────
     # OUTPUTS
     # ────────────────────────────────────────────────────────────────
-    output_dir = (
-        config.general_params.project_root
-        / "outputs_horizon_cd"
-        / f"{config.general_params.exp_name}"
-    )
-    output_dir.mkdir(parents=True, exist_ok=True)
-
     with open(
         output_dir
         / f"{config.general_params.variable}_{config.general_params.exp_name}.pkl",

@@ -4,6 +4,7 @@ data/
 outputs_cd/
 outputs_srm/
 outputs_horizon/
+outputs_horizon_cd/
 record/
 *.egg-info/
 *.egg

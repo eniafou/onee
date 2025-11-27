@@ -332,7 +332,7 @@ def run_long_horizon_forecast(
             title=region_entity,
             save_plot=True,
             save_folder=save_folder,
-            df_monthly=df_monthly
+            df_monthly=df_monthly.rename(columns={"consommation":"consommation_kwh"})
         )
 
     return {

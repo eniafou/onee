@@ -64,8 +64,8 @@ class FeatureBuildingGrid(BaseModel):
     transforms: Tuple[Tuple[str, ...], ...] = (
         ("lchg",),
         ("lchg", "lag_lchg"),
-        ("level"),
-        ("level", "lag"),
+        # ("level"),
+        # ("level", "lag"),
     )
     lags: Tuple[Tuple[int, ...], ...] = ((1,2),)
     feature_block: List[List[str]] = Field(
@@ -149,7 +149,7 @@ if __name__ == "__main__":
     config = ForecastConfig(
         general_params=GeneralParams(
             project_root=Path(__file__).resolve().parents[0],
-            exp_name="gp_2018_1_forced_growth",
+            exp_name="gp_decreasing_growth",
             horizon=5
         )
     )
