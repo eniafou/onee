@@ -241,13 +241,11 @@ def clean_name(name: str) -> str:
 # MAIN PIPELINE
 # ────────────────────────────────────────────────────────────────────────────────
 if __name__ == "__main__":
-    # REGIONS = ["Béni Mellal-Khénifra", "Casablanca-Settat", "Drâa-Tafilalet", "Fès-Meknès", "Laâyoune-Sakia El Hamra", "Marrakech-Safi", "Oriental", "Rabat-Salé-Kénitra", "Tanger-Tétouan-Al Hoceïma", "Souss-Massa"]
     REGIONS = ["Casablanca-Settat", "Drâa-Tafilalet", "Fès-Meknès", "Laâyoune-Sakia El Hamra", "Oriental", "Rabat-Salé-Kénitra", "Tanger-Tétouan-Al Hoceïma", "Souss-Massa"]
-    # REGIONS = ["Casablanca-Settat"]
+
     # Choose which analysis parts (levels) to run
     # 1: Activities, 2: Aggregated BT, 3: Aggregated MT, 4: Total Regional,
     # 5: Individual Distributors, 6: All Distributors, 7: SRM (Regional+Dist)
-    # RUN_LEVELS = {1, 4, 5, 6, 7}
     RUN_LEVELS = {1,4}
 
     for TARGET_REGION in REGIONS:

@@ -2,7 +2,7 @@
 # run_horizon_forecast_srm.py (Clean + Correct)
 # ─────────────────────────────────────────────────────────────
 
-from onee.growth_rate_model import MeanRevertingGrowthModelARP, MeanRevertingGrowthModel, PCAMeanRevertingGrowthModel, RawMeanRevertingGrowthModel, LocalInterpolationForecastModel, AsymmetricAdaptiveTrendModel, FullyAdaptiveTrendModel, GaussianProcessForecastModel
+from onee.growth_rate_model import MeanRevertingGrowthModelARP, MeanRevertingGrowthModel, PCAMeanRevertingGrowthModel, RawMeanRevertingGrowthModel, LocalInterpolationForecastModel, AsymmetricAdaptiveTrendModel, FullyAdaptiveTrendModel, GaussianProcessForecastModel, IntensityForecastWrapper
 from forecast_strategies import (
     create_monthly_matrix,
 )
@@ -40,6 +40,7 @@ MODEL_REGISTRY = {
     "AsymmetricAdaptiveTrendModel": AsymmetricAdaptiveTrendModel,
     "FullyAdaptiveTrendModel": FullyAdaptiveTrendModel,
     "GaussianProcessForecastModel": GaussianProcessForecastModel,
+    "IntensityForecastWrapper": IntensityForecastWrapper,
 }
 
 class GeneralParams(BaseModel):
@@ -50,7 +51,7 @@ class GeneralParams(BaseModel):
     unit: str = "Kwh"
     r2_threshold: float = 0.6
     model_classes: List[str] = Field(
-        default_factory=lambda: ["GaussianProcessForecastModel"] # "MeanRevertingGrowthModelARP", "MeanRevertingGrowthModel", "PCAMeanRevertingGrowthModel", "RawMeanRevertingGrowthModel", "LocalInterpolationForecastModel", "AsymmetricAdaptiveTrendModel", "FullyAdaptiveTrendModel"
+        default_factory=lambda: ["IntensityForecastWrapper"] # "MeanRevertingGrowthModelARP", "MeanRevertingGrowthModel", "PCAMeanRevertingGrowthModel", "RawMeanRevertingGrowthModel", "LocalInterpolationForecastModel", "AsymmetricAdaptiveTrendModel", "FullyAdaptiveTrendModel"
     )
 
 
@@ -129,9 +130,24 @@ class ModelHyperparameterGrid(BaseModel):
     pca_lambda: List[float] = Field(default_factory=lambda: [0.3, 0.9])
 
     # Local interpolation model params
-    window_size: List[int] = Field(default_factory=lambda: [3, 5])
-    weighted: List[bool] = Field(default_factory=lambda: [True])
+    window_size: List[int] = Field(default_factory=lambda: [3])
     weight_decay: List[float] = Field(default_factory=lambda: [0.6, 1])
+    selection_mode: List[str] = Field(
+        default_factory=lambda: ["in_sample"] # "cross_validation", "in_sample"
+    )
+    fit_on_growth_rates: List[bool] = Field(
+        default_factory=lambda: [True]
+    )
+    use_full_history: List[bool] = Field(
+        default_factory=lambda: [True]
+    )
+
+    # Gaussian Process model params
+    n_restarts_optimizer: List[int] = Field(default_factory=lambda: [10])
+    normalize_y: List[bool] = Field(default_factory=lambda: [True, False])
+    normalization_col: List[str] = Field(
+        default_factory=lambda: ["total_active_contrats"]
+    )
 
 
 
@@ -317,6 +333,7 @@ if __name__ == "__main__":
             # --- Process established activities ---
             all_results_established_activite = []
             for activite in established_activites:
+                print("###############################", activite)
                 df_activite = df_contrats[df_contrats['activite'] == activite].copy()
                 df_activite = df_activite.groupby(['annee', 'mois']).agg({
                     config.general_params.variable: 'sum',
@@ -338,7 +355,6 @@ if __name__ == "__main__":
                     ['total_active_contrats', 'just_started', 'two_years_old', 'three_years_old', 'more_than_3_years_old', 'pib_mdh'],
                     # ["pib_mdh", "gdp_primaire", "gdp_secondaire", "gdp_tertiaire"],
                 ]
-
                 res = run_long_horizon_forecast(
                     monthly_matrix=monthly_matrix,
                     years=years,

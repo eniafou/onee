@@ -149,7 +149,7 @@ if __name__ == "__main__":
     config = ForecastConfig(
         general_params=GeneralParams(
             project_root=Path(__file__).resolve().parents[0],
-            exp_name="gp_decreasing_growth",
+            exp_name="gp_test",
             horizon=5
         )
     )

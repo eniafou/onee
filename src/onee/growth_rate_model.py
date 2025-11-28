@@ -1,9 +1,3 @@
-"""
-Standalone Growth Rate Prediction Model - Mean-Reverting with Scipy
-====================================================================
-Proper implementation: Δlog(y_{t+1}) = (1-ρ)μ + ρ*Δlog(y_t) + z_t'γ + ε
-"""
-
 import warnings
 warnings.filterwarnings('ignore')
 
@@ -14,7 +8,7 @@ from pathlib import Path
 from scipy.optimize import minimize
 from sklearn.preprocessing import StandardScaler
 import matplotlib.pyplot as plt
-from typing import Dict, Tuple, Optional, Iterable, List, Mapping
+from typing import Dict, Tuple, Optional, Iterable, List, Mapping, Union
 import inspect
 from onee.utils import add_annual_client_feature, add_yearly_feature
 from abc import ABC, abstractmethod
@@ -22,7 +16,8 @@ from sklearn.linear_model import LinearRegression
 from scipy.interpolate import lagrange, CubicSpline
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import RBF, WhiteKernel, DotProduct, ConstantKernel as C, Matern
-
+import os
+import re
 
 
 
@@ -187,6 +182,217 @@ def build_growth_rate_features(
 
     return feature_array if feature_array.size else None
 
+
+class BaseTrendPrior(ABC):
+    """
+    Abstract strategy for the Deterministic Trend (Prior).
+    """
+    @abstractmethod
+    def fit(self, years: np.ndarray, y_transformed: np.ndarray, X_exog: Optional[np.ndarray] = None):
+        """
+        Fit the trend line to the history.
+        """
+        pass
+
+    @abstractmethod
+    def predict(self, years: Union[np.ndarray, float, int], X_exog: Optional[np.ndarray] = None) -> Union[np.ndarray, float]:
+        """
+        Predict the trend values. Accepts either a vector of years or a single year.
+        """
+        pass
+
+    @abstractmethod
+    def get_params(self) -> Dict:
+        """
+        Return fitted parameters (slope, intercept, etc.) for inspection.
+        """
+        pass
+
+
+# ==========================================
+# 2. LINEAR GROWTH PRIOR (The "Growth Floor")
+# ==========================================
+class LinearGrowthPrior(BaseTrendPrior):
+    """
+    Models a Linear Trend with a forced minimum slope (Growth Floor) 
+    and an anchor to recent data.
+    
+    Equation: y = m*t + b
+    Where 'm' is at least 'min_annual_growth'.
+    """
+    def __init__(self, min_annual_growth: float = 0.02, anchor_window: int = 3):
+        self.min_annual_growth = min_annual_growth
+        self.anchor_window = anchor_window
+        
+        # Fitted params
+        self.forced_slope = None
+        self.forced_intercept = None
+        self.original_raw_slope = None
+
+    def fit(self, years: np.ndarray, y_transformed: np.ndarray, X_exog: Optional[np.ndarray] = None):
+        # 1. Fit Raw Linear Regression to get the "Natural" Slope
+        # We use raw years (e.g. 2020) so the slope represents "Change per Year"
+        X_years = np.array(years).reshape(-1, 1)
+        
+        lr = LinearRegression()
+        lr.fit(X_years, y_transformed)
+        
+        self.original_raw_slope = float(lr.coef_[0])
+        
+        # 2. Apply the "Floor"
+        # If natural slope is -0.05 but min is 0.01, we force 0.01.
+        self.forced_slope = max(self.original_raw_slope, self.min_annual_growth)
+        
+        # 3. Anchor the Intercept to RECENT data
+        # We pivot the new line so it passes through the average of the last N years.
+        valid_window = min(self.anchor_window, len(y_transformed))
+        
+        recent_y_mean = np.mean(y_transformed[-valid_window:])
+        recent_x_mean = np.mean(X_years[-valid_window:])
+        
+        # b = y - mx
+        self.forced_intercept = recent_y_mean - (self.forced_slope * recent_x_mean)
+
+    def predict(self, years: Union[np.ndarray, float, int], X_exog: Optional[np.ndarray] = None) -> Union[np.ndarray, float]:
+        if self.forced_slope is None:
+            raise RuntimeError("LinearGrowthPrior must be fitted before prediction.")
+
+        # Handle Scalar Input
+        is_scalar = np.isscalar(years)
+        if is_scalar:
+            years_arr = np.array([years])
+        else:
+            years_arr = np.array(years)
+
+        # Calculation: y = mx + b
+        result = (self.forced_slope * years_arr) + self.forced_intercept
+
+        if is_scalar:
+            return float(result[0])
+        return result
+
+    def get_params(self) -> Dict:
+        return {
+            "forced_slope": self.forced_slope,
+            "forced_intercept": self.forced_intercept,
+            "original_raw_slope": self.original_raw_slope,
+        }
+
+
+class PowerGrowthPrior(BaseTrendPrior):
+    """
+    Models a trend using a Power function: y = a * (t_relative)^p + b
+    
+    Parameters
+    ----------
+    power : float (0.0 < p <= 1.0)
+        Controls the concavity.
+        - 1.0 = Linear (No slowing down)
+        - 0.5 = Square Root (Moderate slowing) - RECOMMENDED START
+        - 0.1 = Very similar to Logarithmic (Fast slowing)
+    """
+    def __init__(self, power: float = 0.5, anchor_window: int = 3, force_positive_growth: bool = True):
+        self.power = power
+        self.anchor_window = anchor_window
+        self.force_positive_growth = force_positive_growth
+        
+        self.slope_a = None
+        self.intercept_b = None
+        self.start_year_ref = None
+
+    def _get_relative_time(self, years):
+        # t=1, 2, 3...
+        return (years - self.start_year_ref) + 1.0
+
+    def fit(self, years: np.ndarray, y_transformed: np.ndarray, X_exog: Optional[np.ndarray] = None):
+        self.start_year_ref = np.min(years)
+        t_relative = self._get_relative_time(years)
+        
+        # Transform Time: X = t^p
+        X_power = np.power(t_relative, self.power).reshape(-1, 1)
+        
+        # Fit Linear Regression on (t^p, y)
+        lr = LinearRegression()
+        lr.fit(X_power, y_transformed)
+        
+        raw_slope = float(lr.coef_[0])
+        
+        # Enforce Positive Growth
+        if self.force_positive_growth and raw_slope < 0:
+            self.slope_a = 1e-4
+        else:
+            self.slope_a = raw_slope
+
+        # Anchor Intercept
+        valid_window = min(self.anchor_window, len(y_transformed))
+        recent_y_avg = np.mean(y_transformed[-valid_window:])
+        recent_x_avg = np.mean(X_power[-valid_window:])
+        
+        self.intercept_b = recent_y_avg - (self.slope_a * recent_x_avg)
+
+    def predict(self, years: Union[np.ndarray, float, int], X_exog: Optional[np.ndarray] = None):
+        if self.slope_a is None:
+            raise RuntimeError("PowerGrowthPrior must be fitted.")
+            
+        years_arr = np.array(years) if not np.isscalar(years) else np.array([years])
+        
+        t_relative = self._get_relative_time(years_arr)
+        X_power = np.power(t_relative, self.power)
+        
+        result = (self.slope_a * X_power) + self.intercept_b
+        
+        if np.isscalar(years):
+            return float(result[0])
+        return result
+
+    def get_params(self) -> Dict:
+        return {
+            "type": "PowerGrowthPrior",
+            "power": self.power,
+            "slope_a": self.slope_a,
+            "intercept_b": self.intercept_b
+        }
+
+class FlatPrior(BaseTrendPrior):
+    """
+    A strictly neutral prior.
+    It predicts a horizontal line at the mean (or median) of the history.
+    
+    Equation: y = constant
+    """
+    def __init__(self, method="mean"):
+        # method can be 'mean', 'median', or 'last_value'
+        self.method = method
+        self.baseline_value = None
+
+    def fit(self, years: np.ndarray, y_transformed: np.ndarray, X_exog=None):
+        if self.method == "mean":
+            self.baseline_value = np.mean(y_transformed)
+        elif self.method == "median":
+            self.baseline_value = np.median(y_transformed)
+        elif self.method == "last_value":
+            # Very useful for 'Random Walk' assumptions
+            self.baseline_value = y_transformed[-1]
+        else:
+            raise ValueError(f"Unknown method: {self.method}")
+
+    def predict(self, years: Union[np.ndarray, float, int], X_exog=None):
+        if self.baseline_value is None:
+            raise RuntimeError("FlatPrior must be fitted.")
+            
+        # Return the constant value for every requested year
+        if np.isscalar(years):
+            return float(self.baseline_value)
+            
+        return np.full_like(years, self.baseline_value, dtype=float)
+
+    def get_params(self) -> Dict:
+        return {
+            "method": self.method,
+            "baseline_value": self.baseline_value
+        }
+
+
 class BaseForecastModel(ABC):
     """
     Abstract base class for all annual-level forecasting models.
@@ -275,7 +481,7 @@ class BaseForecastModel(ABC):
     # PREDICT
     # ------------------------------------------------------------------
     @abstractmethod
-    def predict(self, X_next: Optional[np.ndarray] = None) -> float:
+    def predict(self, X_next: Optional[np.ndarray] = None, **kwargs) -> float:
         """
         One-step-ahead forecast using the model’s internal fitted state.
 
@@ -412,6 +618,211 @@ class ParamIntrospectionMixin:
             )
 
 
+class IntensityForecastWrapper(BaseForecastModel):
+    """
+    A Wrapper that converts a standard forecast model into an 'Intensity' model.
+    
+    It trains the internal model on (y / normalization_col) and 
+    scales the output back up by (normalization_col) during prediction.
+    """
+    SUPPORTED_HYPERPARAMS = ["normalization_col"]
+
+
+    def __init__(self, normalization_col: str = "total_active_contrats", internal_model: BaseForecastModel = None):
+        if internal_model is None:
+            self.model = GaussianProcessForecastModel(use_log_transform=False)
+        self.norm_col = normalization_col
+        self.fitted_params = {}
+
+    def fit(self, *, y: Optional[np.ndarray] = None, years: Optional[np.ndarray] = None, X: Optional[np.ndarray] = None, normalization_arr: Optional[np.ndarray] = None, **kwargs):
+        """
+        Calculates Intensity = y / normalization_arr
+        Fits the internal model on Intensity.
+        """
+        if y is None or normalization_arr is None:
+            normalization_arr = X[:, 0]
+            print(f"IntensityWrapper requires 'y' and 'normalization_arr' (values of {self.norm_col}).")
+        
+        self.history_norm_arr = np.array(normalization_arr, dtype=float)
+
+        # 1. Calculate Intensity (Avoid division by zero)
+        safe_norm = np.array(normalization_arr, dtype=float)
+        safe_norm[safe_norm == 0] = 1.0
+        
+        y_intensity = y / safe_norm
+        
+        # 2. Fit the internal model on Intensity
+        self.model.fit(y=y_intensity, years=years, X=X, **kwargs)
+        
+        # 3. Store params
+        self.fitted_params = {
+            "internal_model": self.model.__class__.__name__,
+            **self.model.get_params()
+        }
+        return self
+
+    def forecast_horizon(self, start_year: int, horizon: int, df_features: pd.DataFrame, df_monthly, feature_config, monthly_clients_lookup=None):
+        """
+        Gets Intensity forecast from internal model, then multiplies by Future Contracts.
+        """
+        # 1. Validation: Ensure we have the future values for the normalization column
+        if self.norm_col not in df_features.columns:
+            raise ValueError(f"Future df_features must contain '{self.norm_col}' to reverse the intensity normalization.")
+            
+        # 2. Get Intensity Forecast (Mean, Lower, Upper)
+        intensity_results = self.model.forecast_horizon(
+            start_year, horizon, df_features, df_monthly, feature_config, monthly_clients_lookup
+        )
+        
+        # 3. Get Future Normalization Factors (Contracts)
+        future_years = [r[0] for r in intensity_results]
+        future_factors = []
+        
+        for yr in future_years:
+            # Safe lookup for the specific year
+            val = df_features.loc[df_features['annee'] == yr, self.norm_col].values
+            if len(val) == 0:
+                raise ValueError(f"Missing '{self.norm_col}' data for future year {yr}")
+            future_factors.append(val[0])
+            
+        # 4. Scale Back Up
+        final_results = []
+        for i, (yr, mean, lower, upper) in enumerate(intensity_results):
+            factor = future_factors[i]
+            
+            final_mean = mean * factor
+            final_lower = lower * factor
+            final_upper = upper * factor
+            
+            final_results.append((yr, float(final_mean), float(final_lower), float(final_upper)))
+            
+        return final_results
+
+    def get_params(self):
+        out = {}
+        out["hyper_params"] = {
+            "normalization_col": self.norm_col
+        }
+        out["fitted_params"] = self.fitted_params
+        return out
+    
+    # Inside IntensityForecastWrapper
+    def predict(self, X_next: Optional[np.ndarray] = None, normalization_factor = None, **kwargs) -> float:
+        """
+        Predicts total consumption.
+        Requires the normalization value (e.g. contracts) to be passed via kwargs.
+        
+        Example:
+        model.predict(X_next, total_active_contrats=75)
+        """
+        # 1. Get the Intensity Prediction (Base Model)
+        # We pass kwargs down in case the internal model also needs them
+        predicted_intensity = self.model.predict(X_next, **kwargs)
+        
+        if normalization_factor is None:
+            raise ValueError(
+                f"IntensityForecastWrapper requires '{self.norm_col}' to be passed as a keyword argument "
+                f"to predict(). \nUsage: model.predict(X_next, normalization_factor=123)"
+            )
+            
+        # 3. Scale Up
+        return predicted_intensity * float(normalization_factor)
+
+    # Pass-through plotting to the internal model, 
+    # BUT we might need to handle the scale difference. 
+    # Usually easier to just plot the results returned by forecast_horizon externally.
+    def plot_forecast(
+        self, 
+        forecast_results: List[Tuple[int, float, float, float]], 
+        title: Optional[str] = None, 
+        save_plot: bool = False,
+        save_folder: str = ".",
+        df_monthly: Optional[pd.DataFrame] = None,
+        target_col: str = "consommation_kwh"
+    ):
+        """
+        Visualizes the TOTAL Consumption Forecast.
+        
+        It reconstructs the historical total consumption by multiplying the 
+        internal model's training intensity by the stored normalization array.
+        """
+        # 1. Reconstruct Historical Total Consumption
+        # The internal model stores 'train_y' as Intensity.
+        # We stored 'train_norm_arr' (contracts) in self.model during fit (if using the class structure I gave earlier)
+        # Or simpler: we saved it in the wrapper during fit.
+        
+        # We need to access the training data. 
+        # Since 'fit' passed data to self.model, let's grab it from there.
+        history_years = self.model.train_years
+        history_intensity = self.model.train_y
+        
+        # We need the history normalization array (Contracts).
+        # In the previous step, I added 'self.train_norm_arr' to the GPR fit method.
+        # But to be safe and cleaner, the WRAPPER should store what it saw during fit.
+        
+        # Let's assume we update fit() to store self.history_norm_arr. 
+        # (See updated fit method below to ensure this attribute exists).
+        if hasattr(self, 'history_norm_arr') and self.history_norm_arr is not None:
+            history_total = history_intensity * self.history_norm_arr
+        else:
+            # Fallback if attribute missing (shouldn't happen with correct fit)
+            print("Warning: Could not reconstruct total history (missing normalization array). Plotting Intensity.")
+            history_total = history_intensity
+
+        # 2. Unpack Forecast
+        f_years = [x[0] for x in forecast_results]
+        f_mean = [x[1] for x in forecast_results]
+        f_lower = [x[2] for x in forecast_results]
+        f_upper = [x[3] for x in forecast_results]
+
+        plt.figure(figsize=(10, 6))
+
+        # 3. Plot History (Total)
+        plt.scatter(history_years, history_total, color='black', s=40, label='Historical Data (Total)', zorder=5)
+        plt.plot(history_years, history_total, color='black', linestyle=':', alpha=0.3)
+
+        # 4. Plot Forecast (Total)
+        plt.plot(f_years, f_mean, color='blue', linewidth=2, label='Forecast (Mean)', zorder=4)
+        plt.fill_between(f_years, f_lower, f_upper, color='blue', alpha=0.15, label='95% Confidence Interval', zorder=1)
+
+        # 5. Plot Actuals
+        ground_truth_map = {}
+        if df_monthly is not None:
+             if target_col in df_monthly.columns and "annee" in df_monthly.columns:
+                ground_truth_map = df_monthly.groupby("annee")[target_col].sum().to_dict()
+
+        if ground_truth_map:
+            act_years = []
+            act_values = []
+            for y in f_years:
+                if y in ground_truth_map:
+                    act_years.append(y)
+                    act_values.append(ground_truth_map[y])
+            if act_years:
+                plt.scatter(act_years, act_values, color='green', s=60, marker='D', label='Actual Ground Truth', zorder=6)
+
+        # Formatting
+        plot_title = title if title else f"Total Consumption Forecast (Normalized by {self.norm_col})"
+        plt.title(plot_title, fontsize=14)
+        plt.xlabel("Year")
+        plt.ylabel("Value")
+        plt.legend(loc='upper left')
+        plt.grid(True, alpha=0.4)
+        plt.tight_layout()
+
+        # 6. Saving Logic
+        if save_plot:
+            if not os.path.exists(save_folder):
+                os.makedirs(save_folder)
+            safe_name = re.sub(r'[^\w\s-]', '', plot_title).strip().replace(' ', '_')
+            if not safe_name: safe_name = "forecast_plot"
+            file_path = os.path.join(save_folder, f"{safe_name}.png")
+            plt.savefig(file_path, dpi=300)
+            print(f"Plot saved to: {file_path}")
+
+        plt.show()
+
+
 class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
     
     SUPPORTED_HYPERPARAMS = [
@@ -424,7 +835,15 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
         "min_annual_growth"
     ]
 
-    def __init__(self, kernel=None, alpha=1e-10, n_restarts_optimizer=10, normalize_y=True, random_state=42, use_log_transform=True, min_annual_growth=0.02, local_intercept=True):
+    def __init__(self, 
+                 kernel=None, 
+                 alpha=1e-10, 
+                 n_restarts_optimizer=10, 
+                 normalize_y=True, 
+                 random_state=42, 
+                 use_log_transform=True, 
+                 prior_config = None,
+                 ):
         """
         GPR Model for probabilistic extrapolation.
         
@@ -449,16 +868,19 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
             "normalize_y": normalize_y,
             "random_state": random_state,
             "use_log_transform": use_log_transform,
-            "min_annual_growth": min_annual_growth,
-            "local_intercept": local_intercept
+            **(prior_config or {})
         }
+        if not prior_config:
+            self.prior = FlatPrior()
+            # self.prior = PowerGrowthPrior(force_positive_growth=False, power=2)
+        
+        self.prior_model = None
+        self.prior_slope = None
+        self.prior_intercept = None
         
         # Internal Model State
         self.model = None
         self.fitted_params = {}
-        self.prior_model = None
-        self.prior_slope = None
-        self.prior_intercept = None
         self.scaler_x = StandardScaler()
         
         # Data State
@@ -481,48 +903,17 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
         self.train_years = years
         self.train_y = y
 
-        # --- STEP 2: The Growth Floor (Prior) ---
-        # We fit a simple line on Time vs Log(Y) to find the historical slope
-        # We use Raw Years here so the slope is in "Per Year" units
-        X_years_raw = np.array(years).reshape(-1, 1)
+        # The GP model doesn't care HOW the trend is calculated.
+        self.prior.fit(years, y_transformed, X)
         
-        lr = LinearRegression()
-        lr.fit(X_years_raw, y_transformed)
-        
-        raw_slope = lr.coef_[0]
-        forced_slope = max(raw_slope, self.hyper_params["min_annual_growth"])
+        # Get the trend values for history
+        trend_values = self.prior.predict(years)
 
-        if self.hyper_params["local_intercept"]:
-            anchor_window = 3  # Look at the last 3 years (Hyperparameter candidate?)
-            
-            # Safety check: don't crash if we have fewer than 3 points
-            valid_window = min(anchor_window, len(y_transformed))
-            
-            # Slice the last N points
-            recent_y_mean = np.mean(y_transformed[-valid_window:])
-            recent_x_mean = np.mean(X_years_raw[-valid_window:])
-            
-            # Re-Calculate Intercept:
-            # We force the line (with the forced slope) to pass through the recent average.
-            forced_intercept = recent_y_mean - (forced_slope * recent_x_mean)
-        else:
-            # Re-calculate intercept to pivot around the center of mass
-            # y = mx + c  ->  c = mean(y) - m * mean(x)
-            mean_y = np.mean(y_transformed)
-            mean_x = np.mean(X_years_raw)
-            forced_intercept = mean_y - (forced_slope * mean_x)
-        
-        # Store the "Prior" manually
-        self.prior_slope = forced_slope
-        self.prior_intercept = forced_intercept
-        
-        # Calculate the "Deterministic Trend" component
-        trend_values = (self.prior_slope * X_years_raw.flatten()) + self.prior_intercept
-        
         # Calculate Residuals (This is what the GP will actually learn)
         # If the data dipped, residuals will be negative.
         residuals = y_transformed - trend_values
 
+        X_years_raw = np.array(years).reshape(-1, 1)
         if X is not None:
              if X.ndim == 1: X = X.reshape(-1, 1)
              X_full = np.hstack([X_years_raw, X])
@@ -558,13 +949,12 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
         self.fitted_params = {
             "learned_kernel": str(self.model.kernel_),
             "log_marginal_likelihood": float(self.model.log_marginal_likelihood()),
-            "forced_slope": float(self.prior_slope),
-            "original_slope": float(raw_slope)
+            **self.prior.get_params()
         }
         
         return self
 
-    def predict(self, X_next: Optional[np.ndarray] = None) -> float:
+    def predict(self, X_next: Optional[np.ndarray] = None, **kwargs) -> float:
         if self.model is None:
             raise RuntimeError("Model must be fitted before calling predict()")
         
@@ -572,7 +962,7 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
         year_val = X_next[0, 0] # Assume 1st col is Year
         
         # 1. Predict Trend
-        trend_val = (self.prior_slope * year_val) + self.prior_intercept
+        trend_val = self.prior.predict(year_val)
 
         X_scaled = self.scaler.transform(X_next)
         resid_val = self.model.predict(X_scaled)[0]
@@ -629,7 +1019,7 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
         # 4. Predict
         resid_mean, resid_std = self.model.predict(X_scaled, return_std=True)
         
-        trend_vals = (self.prior_slope * future_years) + self.prior_intercept
+        trend_vals = self.prior.predict(future_years)
 
         results = []
         for i, year in enumerate(future_years):
@@ -673,9 +1063,6 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
         """
         Visualizes the forecast, confidence intervals, actuals, AND the underlying Growth Trend.
         """
-        import os
-        import re
-
         # Unpack Forecast
         f_years = [x[0] for x in forecast_results]
         f_mean = [x[1] for x in forecast_results]
@@ -695,21 +1082,17 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
 
         # --- NEW: Plot the "Growth Floor" (The Forced Trend) ---
         # This helps you see if the model is respecting your min_annual_growth
-        if hasattr(self, 'prior_slope') and self.prior_slope is not None:
-            # Create a timeline covering history + forecast
+        if self.prior is not None:
             full_timeline = np.concatenate([self.train_years, f_years])
             full_timeline_sorted = np.sort(np.unique(full_timeline))
             
-            # Calculate the linear trend (in Log space usually)
-            trend_values_log = (self.prior_slope * full_timeline_sorted) + self.prior_intercept
+            # Ask the strategy object for the line
+            trend_vals = self.prior.predict(full_timeline_sorted)
             
-            # Convert back to real space if needed
-            if self.hyper_params.get("use_log_transform", False):
-                trend_values = np.exp(trend_values_log)
-            else:
-                trend_values = trend_values_log
+            if self.hyper_params["use_log_transform"]:
+                trend_vals = np.exp(trend_vals)
                 
-            plt.plot(full_timeline_sorted, trend_values, color='gray', linestyle='--', alpha=0.5, label=f'Growth Floor ({self.prior_slope:.1%} slope)')
+            plt.plot(full_timeline_sorted, trend_vals, color='gray', linestyle='--', alpha=0.5, label='Underlying Trend')
 
         # 4. Plot Actuals
         ground_truth_map = {}
@@ -756,708 +1139,7 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
 
 
 
-class LocalInterpolationForecastModel(ParamIntrospectionMixin, BaseForecastModel):
-    """
-    Local curve-fitting interpolation-based forecast model.
-
-    For each prediction step:
-        - Take the last `window_size` years (or full history).
-        - Fit several candidate models (linear, quadratic, spline, lagrange...).
-        - Select the one with best metric (In-Sample RMSE or Cross-Validation Error).
-        - Extrapolate 1 step forward.
-        - Slide window (if not using full history) and repeat for multi-step forecasting.
-    """
-    SUPPORTED_HYPERPARAMS = {
-        "window_size", "candidate_models", "weighted", "weight_decay", 
-        "min_window", "positive_only", "use_full_history", "selection_mode",
-        "fit_on_growth_rates" # NEW
-    }
-
-    def __init__(
-        self,
-        window_size: int = 5,
-        candidate_models: List[str] = ("linear", "quadratic", "exponential", "logarithmic", "spline", "lagrange"),
-        weighted: bool = True,
-        weight_decay: float = 0.9,
-        min_window: int = 3,
-        positive_only: bool = False,
-        use_full_history: bool = False,
-        selection_mode: str = "cross_validation",
-        fit_on_growth_rates: bool = True, # NEW
-        **kwargs
-    ):
-        self._process_init(locals(), LocalInterpolationForecastModel)
-        self.window_size = window_size
-        self.candidate_models = list(candidate_models)
-        self.weighted = weighted
-        self.weight_decay = weight_decay
-        self.min_window = min_window
-        self.positive_only = positive_only
-        self.use_full_history = use_full_history
-        self.selection_mode = selection_mode
-        self.fit_on_growth_rates = fit_on_growth_rates # NEW
-
-        self.last_years = None
-        self.last_values = None
-
-
-    # ---------------------------------------------------------
-    # Utility: compute weights
-    # ---------------------------------------------------------
-    def _compute_weights(self, n: int):
-        if not self.weighted:
-            return np.ones(n)
-        # weights: [1, λ, λ^2, ...] from oldest to most recent
-        exponents = np.arange(n-1, -1, -1)
-        return np.power(self.weight_decay, exponents)
-
-    # ---------------------------------------------------------
-    # Fit individual candidate models
-    # ---------------------------------------------------------
-    def _fit_linear(self, years, values, weights):
-        # y = a + b * t
-        lr = LinearRegression()
-        lr.fit(years.reshape(-1, 1), values, sample_weight=weights)
-        def predict(t):
-            return lr.predict(np.array([[t]]))[0]
-        return predict
-
-    def _fit_quadratic(self, years, values, weights):
-        # y = a + b t + c t^2
-        X = np.column_stack([years, years**2])
-        lr = LinearRegression()
-        lr.fit(X, values, sample_weight=weights)
-        def predict(t):
-            Xt = np.array([[t, t*t]])
-            return lr.predict(Xt)[0]
-        return predict
-
-    def _fit_exponential(self, years, values, weights):
-        # y = A e^(Bt) => log(y) = log(A) + B t
-        if np.any(values <= 0):
-            return None  # invalid for exponential
-        lr = LinearRegression()
-        lr.fit(years.reshape(-1, 1), np.log(values), sample_weight=weights)
-        A = np.exp(lr.intercept_)
-        B = lr.coef_[0]
-        def predict(t):
-            return A * np.exp(B * t)
-        return predict
-
-    def _fit_logarithmic(self, years, values, weights):
-        # y = A + B ln(t)
-        # Shift time to ensure log domain validity if years are 0-indexed or negative
-        t_shift = 1 - np.min(years) if np.min(years) <= 0 else 0
-        years_log = np.log(years + t_shift)
-        
-        lr = LinearRegression()
-        lr.fit(years_log.reshape(-1, 1), values, sample_weight=weights)
-        
-        def predict(t):
-            if (t + t_shift) <= 0: return values[-1] # Safety fallback
-            return lr.predict(np.array([[np.log(t + t_shift)]]))[0]
-        return predict
-
-    def _fit_lagrange(self, years, values, weights):
-        # Lagrange Interpolation (Exact fit)
-        # Numerical stability fix: shift years to start at 0
-        t0 = years[0]
-        years_shifted = years - t0
-        
-        # scipy.interpolate.lagrange returns a numpy polynomial object
-        poly = lagrange(years_shifted, values)
-        
-        def predict(t):
-            return poly(t - t0)
-        return predict
-
-    def _fit_spline(self, years, values, weights):
-        # Cubic Spline Interpolation (Exact fit, smoother than Lagrange)
-        cs = CubicSpline(years, values, bc_type='natural')
-        return lambda t: cs(t)
-
-    # ---------------------------------------------------------
-    # Model selection
-    # ---------------------------------------------------------
-    def _evaluate_in_sample(self, predict_fn, years, values, weights):
-        """Standard RMSE on training data"""
-        preds = np.array([predict_fn(t) for t in years])
-        errors = preds - values
-        return np.sqrt(np.average(errors**2, weights=weights))
-
-    def _select_best_model(self, years, values):
-        n = len(values)
-        if n < self.min_window:
-            return lambda t: values[-1], "constant"
-
-        years = np.asarray(years, float)
-        values = np.asarray(values, float)
-
-        # Mapping names to functions
-        fitters = {
-            "linear": self._fit_linear,
-            "quadratic": self._fit_quadratic,
-            "exponential": self._fit_exponential,
-            "logarithmic": self._fit_logarithmic,
-            "lagrange": self._fit_lagrange,
-            "spline": self._fit_spline,
-        }
-
-        # -----------------------------------------------------
-        # STRATEGY 1: CROSS VALIDATION (The "Fair" Way)
-        # -----------------------------------------------------
-        if self.selection_mode == "cross_validation":
-            # Train on T[:-1], Test on T[-1]
-            train_y = years[:-1]
-            train_v = values[:-1]
-            test_y = years[-1]
-            test_v = values[-1]
-            
-            # If not enough data for CV, fallback to linear on full data
-            if len(train_v) < 2:
-                weights = self._compute_weights(n)
-                return self._fit_linear(years, values, weights), "linear_fallback"
-
-            train_weights = self._compute_weights(len(train_v))
-            
-            best_name = "linear" # default
-            best_error = np.inf
-
-            for name in self.candidate_models:
-                if name not in fitters: continue
-                # interpolators need enough points
-                if name in ["quadratic", "lagrange", "spline"] and len(train_v) < 3: continue 
-
-                try:
-                    fn = fitters[name](train_y, train_v, train_weights)
-                    if fn is None: continue
-                    
-                    pred = fn(test_y)
-                    error = abs(pred - test_v)
-                    
-                    if error < best_error:
-                        best_error = error
-                        best_name = name
-                except:
-                    continue
-            
-            # REFIT best model on ALL data
-            final_weights = self._compute_weights(n)
-            final_fn = fitters.get(best_name, self._fit_linear)(years, values, final_weights)
-            return final_fn, best_name
-
-        # -----------------------------------------------------
-        # STRATEGY 2: IN-SAMPLE RMSE (The "Interpolation wins" Way)
-        # -----------------------------------------------------
-        else:
-            weights = self._compute_weights(n)
-            best_name = None
-            best_fn = None
-            best_rmse = np.inf
-
-            for name in self.candidate_models:
-                if name not in fitters: continue
-                if name in ["quadratic", "lagrange", "spline"] and n < 3: continue
-
-                try:
-                    fn = fitters[name](years, values, weights)
-                    if fn is None: continue
-                    
-                    rmse = self._evaluate_in_sample(fn, years, values, weights)
-                    if rmse < best_rmse:
-                        best_rmse = rmse
-                        best_name = name
-                        best_fn = fn
-                except:
-                    continue
-
-            if best_fn is None:
-                return lambda t: values[-1], "constant"
-
-            return best_fn, best_name
-
-    def fit(self, *, y=None, monthly_matrix=None, years=None, X=None, **kwargs):
-        if y is None:
-            raise ValueError("y must be provided")
-
-        self.last_values = np.asarray(y, float)
-        if years is not None:
-            self.last_years = np.asarray(years, int)
-        else:
-            self.last_years = np.arange(len(self.last_values))
-        return self
-    
-    def _to_growth_rates(self, years, values):
-        """
-        Converts:
-           Years:  [2020, 2021, 2022]
-           Values: [100,  110,  121]
-        To:
-           Years:  [2021, 2022] (Associated with the 'end' of the period)
-           Rates:  [0.095, 0.095] (approx 10%) -> log(110/100), log(121/110)
-        """
-        if np.any(values <= 0):
-            # Cannot take logs of non-positive numbers. 
-            # Fallback strategy: return unchanged (or raise error)
-            # Here we just disable the feature silently for safety
-            return years, values, False
-
-        log_vals = np.log(values)
-        rates = np.diff(log_vals) # size becomes N-1
-        rate_years = years[1:]    # align with the result year
-        
-        return rate_years, rates, True
-
-    def _predict_one(self):
-        values = self.last_values
-        years = self.last_years
-
-        # 1. Select Data Context
-        if self.use_full_history:
-            local_values = values
-            local_years = years
-        else:
-            window = min(self.window_size, len(values))
-            local_values = values[-window:]
-            local_years = years[-window:]
-
-        # 2. Check: Growth Rate Mode
-        is_growth_mode = False
-        if self.fit_on_growth_rates:
-            # Transform data to rates
-            # Note: We need at least 2 points to get 1 rate. 
-            # If we have 3 points, we get 2 rates.
-            rate_years, rates, success = self._to_growth_rates(local_years, local_values)
-            if success and len(rates) >= self.min_window:
-                local_years = rate_years
-                local_values = rates
-                is_growth_mode = True
-
-        # 3. Fit and Predict
-        # If in growth mode, we are predicting the NEXT RATE.
-        # If normal mode, we are predicting the NEXT VALUE.
-        predict_fn, model_name = self._select_best_model(local_years, local_values)
-        
-        next_t = years[-1] + 1
-        predicted_result = predict_fn(next_t)
-
-        # 4. Inverse Transform if needed
-        if is_growth_mode:
-            # We predicted a log-growth rate. Apply it to the last known real value.
-            # y_{t+1} = y_t * exp(predicted_rate)
-            last_real_val = values[-1]
-            next_val = last_real_val * np.exp(predicted_result)
-            model_name = f"{model_name}_growth" # Tag it for debugging
-        else:
-            next_val = predicted_result
-
-        return next_val, model_name
-
-    def predict(self, X_next=None) -> float:
-        next_val, _ = self._predict_one()
-        return float(next_val)
-
-    
-    def forecast_horizon(self, start_year, horizon, **kwargs):
-        preds = []
-        # We must clone the history because we will append predictions to it
-        current_years = self.last_years.copy()
-        current_vals = self.last_values.copy()
-
-        for h in range(1, horizon + 1):
-            # 1. Select Context
-            if self.use_full_history:
-                ctx_years = current_years
-                ctx_vals = current_vals
-            else:
-                ctx_years = current_years[-self.window_size:]
-                ctx_vals = current_vals[-self.window_size:]
-
-            # 2. Handle Growth Mode logic manually here to recurse correctly
-            is_growth_mode = False
-            target_years = ctx_years
-            target_vals = ctx_vals
-
-            if self.fit_on_growth_rates:
-                rate_years, rates, success = self._to_growth_rates(ctx_years, ctx_vals)
-                if success and len(rates) >= self.min_window:
-                    target_years = rate_years
-                    target_vals = rates
-                    is_growth_mode = True
-
-            # 3. Predict
-            next_val_fn, _ = self._select_best_model(target_years, target_vals)
-            print(start_year)
-            print(_)
-            print("------------------")
-            next_year = start_year + h
-            
-            raw_prediction = next_val_fn(next_year)
-
-            # 4. Reconstruct
-            if is_growth_mode:
-                last_real_val = current_vals[-1]
-                pred = last_real_val * np.exp(raw_prediction)
-            else:
-                pred = raw_prediction
-
-            preds.append((next_year, pred))
-
-            # 5. Update state for recursion
-            current_years = np.append(current_years, next_year)
-            current_vals = np.append(current_vals, pred)
-
-        return preds
-
-
-    def get_params(self) -> Dict:
-        return {
-            "hyper_params": {
-                "window_size": self.window_size,
-                "candidate_models": self.candidate_models,
-                "weighted": self.weighted,
-                "weight_decay": self.weight_decay,
-                "min_window": self.min_window,
-                "positive_only": self.positive_only,
-                "use_full_history": self.use_full_history,
-                "selection_mode": self.selection_mode,
-                "fit_on_growth_rates": self.fit_on_growth_rates
-            },
-            "fitted_params": {},
-        }
-
-class RawMeanRevertingGrowthModel(ParamIntrospectionMixin, BaseForecastModel):
-    """
-    Mean-reverting AR(p) model using *raw differences*.
-
-    Model:
-        Δy_t = (1 - Σρ_j) * μ
-                + Σ(ρ_j * Δy_{t-j})
-                + β * (Δy_{t-1})²   [optional]
-                + γᵀ X_t            [optional]
-                + ε
-
-    Reconstruction:
-        y_t = y_{t-1} + Δy_t
-    """
-
-    SUPPORTED_HYPERPARAMS = {
-        "include_ar",
-        "ar_lags",
-        "include_ar_squared",
-        "include_exog",
-        "l2_penalty",
-        "beta_bounds",
-        "use_asymmetric_loss",
-        "underestimation_penalty",
-    }
-
-
-    def __init__(
-        self,
-        include_ar: bool = True,
-        ar_lags: int = 1,
-        include_ar_squared: bool = False,
-        include_exog: bool = True,
-        l2_penalty: float = 1.0,
-        beta_bounds: Tuple[float, float] = (-1.0, 1.0),
-        use_asymmetric_loss: bool = False,
-        underestimation_penalty: float = 2.0,
-        **kwargs
-    ):
-        self._process_init(locals(), RawMeanRevertingGrowthModel)
-
-        self.include_ar = include_ar
-        self.ar_lags = ar_lags
-        self.include_ar_squared = include_ar_squared
-        self.include_exog = include_exog
-        self.l2_penalty = l2_penalty
-        self.beta_bounds = beta_bounds
-        self.use_asymmetric_loss = use_asymmetric_loss
-        self.underestimation_penalty = underestimation_penalty
-
-        # Fitted parameters
-        self.mu = None
-        self.rho = None       # vector, length p
-        self.beta = None
-        self.gamma = None
-        self.scaler = None
-
-        # State for forecasting
-        self.last_y = None
-        self.last_growths = None   # vector of last p differences
-
-    # -------------------------------------------------------
-    # Objective function
-    # -------------------------------------------------------
-    def _objective(self, params, diffs, X_scaled):
-        """
-        params = [mu, rho_1, ..., rho_p, (beta), gamma...]
-        diffs: ΔPC values (length T-1)
-        """
-        idx = 0
-        mu = params[idx]
-        idx += 1
-
-        # AR coefficients
-        if self.include_ar:
-            rho = params[idx: idx + self.ar_lags]
-            idx += self.ar_lags
-        else:
-            rho = np.zeros(self.ar_lags)
-
-        # squared term
-        if self.include_ar_squared:
-            beta = params[idx]
-            idx += 1
-        else:
-            beta = 0.0
-
-        # exog
-        if self.include_exog and X_scaled is not None:
-            gamma = params[idx:]
-        else:
-            gamma = np.zeros(0)
-
-        p = self.ar_lags if self.include_ar else 1
-        n = len(diffs) - p
-
-        if n <= 0:
-            return 1e10
-
-        y_pred = np.zeros(n)
-        for i in range(n):
-            t = p + i
-
-            # mean-reversion constant
-            c = (1 - np.sum(rho)) * mu
-            val = c
-
-            # AR terms
-            for j in range(self.ar_lags):
-                val += rho[j] * diffs[t - 1 - j]
-
-            # squared term
-            if self.include_ar_squared:
-                val += beta * (diffs[t - 1] ** 2)
-
-            # exogenous
-            if self.include_exog and X_scaled is not None:
-                val += np.dot(X_scaled[t - 1], gamma)
-
-            y_pred[i] = val
-
-        y_true = diffs[p:]
-        errors = y_true - y_pred
-
-        if self.use_asymmetric_loss:
-            se = errors ** 2
-            mask = errors > 0
-            se[mask] *= self.underestimation_penalty
-            loss = np.mean(se)
-        else:
-            loss = np.mean(errors ** 2)
-
-        # L2 on gamma
-        if self.include_exog and len(gamma) > 0:
-            loss += self.l2_penalty * np.sum(gamma ** 2)
-
-        return loss
-
-    # -------------------------------------------------------
-    # Fit
-    # -------------------------------------------------------
-    def fit(self, *, y=None, monthly_matrix=None, years=None, X=None, **kwargs):
-        """
-        Fit using only PC levels (y is the PC values).
-        """
-        pc = np.asarray(y, float)
-        if pc.ndim != 1:
-            raise ValueError("PC levels must be a 1D vector")
-
-        diffs = np.diff(pc)
-
-        if len(diffs) < max(2, self.ar_lags + 1):
-            raise ValueError("Not enough samples to fit raw-PC model")
-    
-        # ---------------- Exogenous ----------------------
-        X_scaled = None
-        if self.include_exog and X is not None:
-            X = np.asarray(X, float)
-            if X.ndim == 1:
-                X = X.reshape(-1, 1)
-
-            X_aligned = X[1:]  # align exog to diffs
-
-            # fill NaNs
-            if np.isnan(X_aligned).any():
-                col_means = np.nanmean(X_aligned, axis=0)
-                for i in range(X_aligned.shape[1]):
-                    X_aligned[np.isnan(X_aligned[:, i]), i] = col_means[i]
-
-            self.scaler = StandardScaler()
-            X_scaled = self.scaler.fit_transform(X_aligned)
-
-        # ---------------- Parameter initialization --------------------
-        mu_init = np.mean(diffs)
-        params_init = [mu_init]
-        bounds = [(None, None)]
-
-        if self.include_ar:
-            params_init.extend([0.3] * self.ar_lags)
-            bounds.extend([(None, None)] * self.ar_lags)
-
-        if self.include_ar_squared:
-            params_init.append(0.0)
-            bounds.append(self.beta_bounds)
-
-        if self.include_exog and X_scaled is not None:
-            k = X_scaled.shape[1]
-            params_init.extend([0.0] * k)
-            bounds.extend([(None, None)] * k)
-
-        params_init = np.array(params_init)
-
-        # ---------------- Optimize -----------------------
-        result = minimize(
-            fun=self._objective,
-            x0=params_init,
-            args=(diffs, X_scaled),
-            method="L-BFGS-B",
-            bounds=bounds,
-            options={"maxiter": 1000, "ftol": 1e-9, "gtol": 1e-5, "maxls": 50}
-        )
-
-        if not result.success:
-            print(f"⚠️ RawPC model optimization warning: {result.message}")
-
-        # ---------------- Extract parameters -----------------------
-        idx = 0
-        self.mu = result.x[idx]
-        idx += 1
-
-        if self.include_ar:
-            self.rho = result.x[idx: idx + self.ar_lags]
-            idx += self.ar_lags
-        else:
-            self.rho = np.zeros(self.ar_lags)
-
-        if self.include_ar_squared:
-            self.beta = result.x[idx]
-            idx += 1
-        else:
-            self.beta = 0.0
-
-        if self.include_exog and X_scaled is not None:
-            self.gamma = result.x[idx:]
-        else:
-            self.gamma = np.zeros(0)
-
-        # ---------------- Store last state for forecasting -----------------------
-        self.last_y = pc[-1]
-        p = self.ar_lags if self.include_ar else 1
-        self.last_growths = diffs[-p:] if len(diffs) >= p else diffs
-
-        return self
-
-    # -------------------------------------------------------
-    # Predict next PC value
-    # -------------------------------------------------------
-    def predict(self, X_next=None) -> float:
-        """
-        Predicts next PC level (not difference).
-        """
-
-        # AR(p) prediction of diff
-        c = (1 - np.sum(self.rho)) * self.mu
-        diff_pred = c
-
-        # AR terms
-        if self.include_ar and len(self.last_growths) > 0:
-            for j in range(min(self.ar_lags, len(self.last_growths))):
-                diff_pred += self.rho[j] * self.last_growths[-(j+1)]
-
-        # squared term
-        if self.include_ar_squared and len(self.last_growths) > 0:
-            diff_pred += self.beta * (self.last_growths[-1] ** 2)
-
-        # exogenous
-        if self.include_exog and X_next is not None and self.scaler is not None:
-            X_next = np.asarray(X_next, float).reshape(1, -1)
-            X_next_scaled = self.scaler.transform(X_next)
-            diff_pred += np.dot(X_next_scaled[0], self.gamma)
-
-        # convert to PC level
-        pc_pred = self.last_y + diff_pred
-        return float(pc_pred)
-
-    # -------------------------------------------------------
-    # Multi-step forecasting
-    # -------------------------------------------------------
-    def forecast_horizon(
-        self,
-        start_year: int,
-        horizon: int,
-        df_features,
-        df_monthly,
-        feature_config,
-        monthly_clients_lookup=None,
-    ):
-        preds = []
-        for h in range(1, horizon + 1):
-            target_year = start_year + h
-
-            # Build exogenous features for target year
-            X_next = build_growth_rate_features(
-                years=[target_year],
-                df_features=df_features,
-                df_monthly=df_monthly,
-                clients_lookup=monthly_clients_lookup,
-                **feature_config
-            )
-
-            x_input = None
-            if X_next is not None:
-                X_next = np.asarray(X_next, float)
-                x_input = X_next[0]
-
-            pc_pred = self.predict(x_input)
-            preds.append((target_year, pc_pred))
-
-            # Update state
-            diff_pred = pc_pred - self.last_y
-
-            if self.include_ar:
-                if self.ar_lags > 1:
-                    self.last_growths = np.append(self.last_growths[1:], diff_pred)
-                else:
-                    self.last_growths = np.array([diff_pred])
-
-            self.last_y = pc_pred
-
-        return preds
-
-    def get_params(self) -> Dict:
-        return {
-            "hyper_params": {
-                "include_ar": self.include_ar,
-                "ar_lags": self.ar_lags,
-                "include_ar_squared": self.include_ar_squared,
-                "include_exog": self.include_exog,
-                "l2_penalty": self.l2_penalty,
-                "beta_bounds": getattr(self, 'beta_bounds', None),
-                "use_asymmetric_loss": getattr(self, 'use_asymmetric_loss', None),
-                "underestimation_penalty": getattr(self, 'underestimation_penalty', None),
-            },
-            "fitted_params": {
-                "mu": getattr(self, 'mu', None),
-                "rho": getattr(self, 'rho', None),
-                "beta": getattr(self, 'beta', None),
-                "gamma": getattr(self, 'gamma', None),
-            },
-        }
-
-class MeanRevertingGrowthModel(ParamIntrospectionMixin, BaseForecastModel):
+class MeanRevertingGrowthModel(ParamIntrospectionMixin):
     """
     Mean-reverting growth rate model with constrained optimization.
     
@@ -1696,7 +1378,7 @@ class MeanRevertingGrowthModel(ParamIntrospectionMixin, BaseForecastModel):
         
         return self
     
-    def predict(self, X_next: Optional[np.ndarray] = None) -> float:
+    def predict(self, X_next: Optional[np.ndarray] = None, **kwargs) -> float:
         """
         Predict next year's consumption.
         
@@ -1801,1596 +1483,6 @@ class MeanRevertingGrowthModel(ParamIntrospectionMixin, BaseForecastModel):
                 fitted['half_life'] = -np.log(2) / np.log(rho_val) if rho_val is not None and rho_val > 0 else np.inf
             except Exception:
                 fitted['half_life'] = None
-
-        return {
-            'hyper_params': hyper,
-            'fitted_params': fitted,
-        }
-
-
-class MeanRevertingGrowthModelARP(ParamIntrospectionMixin, BaseForecastModel):
-    """
-    Mean-reverting growth rate model with AR(p) structure and constrained optimization.
-    
-    Model: Δlog(y_{t}) = (1-Σρ_j)μ + Σ(ρ_j * Δlog(y_{t-j})) + β*[Δlog(y_{t-1})]² + z_t'γ + ε
-    
-    Parameters:
-        - μ: long-run mean growth rate
-        - ρ_j: AR coefficients for j=1,...,p lags (constrained for stationarity via PACF)
-        - β: squared AR term coefficient
-        - γ: coefficients for exogenous features
-        - use_asymmetric_loss: whether to use asymmetric loss that penalizes underestimation
-        - underestimation_penalty: multiplier for underestimation errors (e.g., 2.0 or 3.0)
-    """
-
-    SUPPORTED_HYPERPARAMS = {
-    "include_ar",
-    "ar_lags",
-    "include_ar_squared",
-    "include_exog",
-    "l2_penalty",
-    "beta_bounds",
-    "mu_bounds",
-    "use_asymmetric_loss",
-    "underestimation_penalty",
-}
-
-    
-    def __init__(self, 
-                 include_ar: bool = True,
-                 ar_lags: int = 3,
-                 include_ar_squared: bool = False,
-                 include_exog: bool = True,
-                 l2_penalty: float = 1.0,
-                 beta_bounds: Tuple[float, float] = (-1.0, 1.0),
-                 mu_bounds: Tuple[float, float] = (0.0, None),
-                 use_asymmetric_loss: bool = False,
-                 underestimation_penalty: float = 2.0, **kwargs):
-        
-        self._process_init(locals(), MeanRevertingGrowthModelARP)
-
-        self.include_ar = include_ar
-        self.ar_lags = ar_lags
-        self.include_ar_squared = include_ar_squared
-        self.include_exog = include_exog
-        self.l2_penalty = l2_penalty
-        self.beta_bounds = beta_bounds
-        self.mu_bounds = mu_bounds
-        self.use_asymmetric_loss = use_asymmetric_loss
-        self.underestimation_penalty = underestimation_penalty
-        
-        # Fitted parameters
-        self.mu = None
-        self.rho = None  # Now a vector of length ar_lags
-        self.beta = None
-        self.gamma = None
-        self.scaler = None
-        
-        # For prediction
-        self.last_growth_rates = None  # Now stores multiple lags
-        self.last_y = None
-        
-    def _pacf_to_ar(self, pacf: np.ndarray) -> np.ndarray:
-        """
-        Convert partial autocorrelations to AR coefficients using Durbin-Levinson recursion.
-        This ensures stationarity as long as |pacf[j]| < 1 for all j.
-        
-        Args:
-            pacf: Partial autocorrelations (length p)
-        
-        Returns:
-            AR coefficients (length p)
-        """
-        p = len(pacf)
-        if p == 0:
-            return np.array([])
-        
-        if p == 1:
-            return pacf.copy()
-        
-        # Durbin-Levinson recursion
-        ar_coeffs = np.zeros((p, p))
-        ar_coeffs[0, 0] = pacf[0]
-        
-        for k in range(1, p):
-            # New PACF value
-            ar_coeffs[k, k] = pacf[k]
-            
-            # Update previous coefficients
-            for j in range(k):
-                ar_coeffs[k, j] = ar_coeffs[k-1, j] - pacf[k] * ar_coeffs[k-1, k-1-j]
-        
-        return ar_coeffs[p-1, :]
-    
-    def _ar_to_pacf(self, ar_coeffs: np.ndarray) -> np.ndarray:
-        """
-        Convert AR coefficients to partial autocorrelations (inverse of _pacf_to_ar).
-        Used for initialization.
-        
-        Args:
-            ar_coeffs: AR coefficients (length p)
-        
-        Returns:
-            Partial autocorrelations (length p)
-        """
-        p = len(ar_coeffs)
-        if p == 0:
-            return np.array([])
-        
-        if p == 1:
-            return ar_coeffs.copy()
-        
-        pacf = np.zeros(p)
-        ar_temp = ar_coeffs.copy()
-        
-        for k in range(p-1, -1, -1):
-            pacf[k] = ar_temp[k]
-            
-            if k > 0:
-                for j in range(k):
-                    ar_temp[j] = (ar_temp[j] + pacf[k] * ar_temp[k-1-j]) / (1 - pacf[k]**2 + 1e-10)
-        
-        return pacf
-    
-    def _objective(self, params: np.ndarray, growth_rates: np.ndarray, 
-                   X_scaled: Optional[np.ndarray]) -> float:
-        """
-        Objective function: MSE (or asymmetric loss) + L2 penalty.
-        
-        params structure depends on configuration:
-        - AR(p): [μ, pacf_1, ..., pacf_p]
-        - AR(p) + AR²: [μ, pacf_1, ..., pacf_p, β]
-        - Exog only: [μ, γ_1, ..., γ_k]
-        - AR(p) + Exog: [μ, pacf_1, ..., pacf_p, γ_1, ..., γ_k]
-        - AR(p) + AR² + Exog: [μ, pacf_1, ..., pacf_p, β, γ_1, ..., γ_k]
-        - Neither: [μ]
-        
-        Note: We optimize over PACF parameters (transformed via tanh) to ensure stationarity.
-        """
-        
-        idx = 0
-        mu = params[idx]
-        idx += 1
-        
-        # Extract and transform PACF to AR coefficients
-        if self.include_ar:
-            pacf_raw = params[idx:idx+self.ar_lags]
-            pacf = np.tanh(pacf_raw)  # Constrain to (-1, 1)
-            rho = self._pacf_to_ar(pacf)
-            idx += self.ar_lags
-        else:
-            rho = np.array([])
-        
-        if self.include_ar_squared:
-            beta = params[idx]
-            idx += 1
-        else:
-            beta = 0.0
-        
-        if self.include_exog and X_scaled is not None:
-            gamma = params[idx:]
-        else:
-            gamma = np.array([])
-        
-        # Build predictions
-        # We need at least ar_lags observations to start predicting
-        p = self.ar_lags if self.include_ar else 0
-        n = len(growth_rates) - p
-        
-        if n <= 0:
-            return 1e10  # Not enough data
-        
-        y_pred = np.zeros(n)
-        
-        for i in range(n):
-            # Start index in growth_rates for this prediction
-            t = p + i
-            
-            # Δlog(y_{t+1}) = (1-Σρ_j)μ + Σ(ρ_j * Δlog(y_{t+1-j})) + β*[Δlog(y_t)]² + z_t'γ
-            rho_sum = np.sum(rho) if len(rho) > 0 else 0.0
-            y_pred[i] = (1 - rho_sum) * mu
-            
-            # Add AR terms
-            if self.include_ar:
-                for j in range(self.ar_lags):
-                    y_pred[i] += rho[j] * growth_rates[t - 1 - j]
-            
-            # Add squared term (most recent lag only)
-            if self.include_ar_squared:
-                y_pred[i] += beta * (growth_rates[t - 1] ** 2)
-            
-            # Add exogenous terms
-            if self.include_exog and X_scaled is not None:
-                y_pred[i] += np.dot(X_scaled[t - 1], gamma)
-        
-        y_true = growth_rates[p:]
-        errors = y_true - y_pred
-        
-        # Compute loss based on mode
-        if self.use_asymmetric_loss:
-            # Asymmetric loss: penalize underestimation more heavily
-            squared_errors = errors ** 2
-            underestimation_mask = errors > 0  # True where we underestimated
-            
-            # Apply penalty multiplier to underestimation errors
-            weighted_errors = squared_errors.copy()
-            weighted_errors[underestimation_mask] *= self.underestimation_penalty
-            
-            loss = np.mean(weighted_errors)
-        else:
-            # Standard MSE
-            loss = np.mean(errors ** 2)
-        
-        # L2 penalty (exclude μ, ρ, and β from regularization, only penalize γ)
-        if self.include_exog and len(gamma) > 0:
-            l2_term = self.l2_penalty * np.sum(gamma ** 2)
-        else:
-            l2_term = 0.0
-        
-        return loss + l2_term
-    
-    def fit(self, *, y=None, X=None, **kwargs):
-        """
-        Fit the mean-reverting growth model.
-        
-        Args:
-            y: Annual consumption levels (shape: T,)
-            X: Exogenous features (shape: T, k) - optional
-        """
-        y = np.asarray(y, dtype=float).flatten()
-        # Compute growth rates
-        growth_rates = np.diff(np.log(y))
-        
-        # Check if we have enough data
-        min_obs = self.ar_lags + 1 if self.include_ar else 2
-        if len(growth_rates) < min_obs:
-            raise ValueError(f"Need at least {min_obs} years of data for ar_lags={self.ar_lags}")
-        
-        # Handle exogenous features
-        X_scaled = None
-        if self.include_exog and X is not None:
-            X = np.asarray(X, dtype=float)
-            if X.ndim == 1:
-                X = X.reshape(-1, 1)
-            
-            # Align X with growth rates (skip first year)
-            X_aligned = X[1:]
-            
-            # Handle NaN
-            if np.isnan(X_aligned).any():
-                col_means = np.nanmean(X_aligned, axis=0)
-                for i in range(X_aligned.shape[1]):
-                    X_aligned[np.isnan(X_aligned[:, i]), i] = col_means[i]
-            
-            # Standardize
-            self.scaler = StandardScaler()
-            X_scaled = self.scaler.fit_transform(X_aligned)
-        
-        # Initialize parameters
-        mu_init = np.mean(growth_rates)
-        
-        params_init = [mu_init]
-        bounds = [self.mu_bounds]  # μ unbounded
-        
-        if self.include_ar:
-            # Initialize PACF parameters (in raw space, before tanh)
-            # Start with small values that correspond to moderate AR coefficients
-            if self.ar_lags == 1:
-                # For backward compatibility, initialize to ~0.5 after tanh
-                pacf_init = [0.549]  # tanh(0.549) ≈ 0.5
-            else:
-                # For multiple lags, use decaying initialization
-                pacf_init = [0.549 / (j + 1) for j in range(self.ar_lags)]
-            
-            params_init.extend(pacf_init)
-            bounds.extend([(None, None)] * self.ar_lags)  # PACF unbounded (tanh constrains them)
-        
-        if self.include_ar_squared:
-            params_init.append(0.0)  # β initial guess
-            bounds.append(self.beta_bounds)
-        
-        if self.include_exog and X_scaled is not None:
-            k = X_scaled.shape[1]
-            params_init.extend([0.0] * k)  # γ initial guess
-            bounds.extend([(None, None)] * k)  # γ unbounded
-        
-        params_init = np.array(params_init)
-        
-        # Optimize
-        result = minimize(
-            fun=self._objective,
-            x0=params_init,
-            args=(growth_rates, X_scaled),
-            method='L-BFGS-B',
-            bounds=bounds,
-            options={'maxiter': 1000, 'ftol': 1e-9}
-        )
-        
-        if not result.success:
-            print(f"⚠️  Optimization warning: {result.message}")
-        
-        # Extract fitted parameters
-        idx = 0
-        self.mu = result.x[idx]
-        idx += 1
-        
-        if self.include_ar:
-            pacf_raw = result.x[idx:idx+self.ar_lags]
-            pacf = np.tanh(pacf_raw)
-            self.rho = self._pacf_to_ar(pacf)
-            idx += self.ar_lags
-        else:
-            self.rho = np.array([])
-        
-        if self.include_ar_squared:
-            self.beta = result.x[idx]
-            idx += 1
-        else:
-            self.beta = 0.0
-        if self.include_exog and X_scaled is not None:
-            self.gamma = result.x[idx:]
-        else:
-            self.gamma = np.array([])
-        
-        # Store last p growth rates for prediction
-        p = self.ar_lags if self.include_ar else 1
-        self.last_growth_rates = growth_rates[-p:] if len(growth_rates) >= p else growth_rates
-        self.last_y = y[-1]
-        
-        return self
-    
-    def predict(self, X_next: Optional[np.ndarray] = None) -> float:
-        """
-        Predict next year's consumption.
-        
-        Args:
-            X_next: Exogenous features for next period
-        
-        Returns:
-            Predicted consumption level
-        """
-        # Δlog(y_{t+1}) = (1-Σρ_j)μ + Σ(ρ_j * Δlog(y_{t+1-j})) + β*[Δlog(y_t)]² + z_t'γ
-        rho_sum = np.sum(self.rho) if len(self.rho) > 0 else 0.0
-        predicted_growth = (1 - rho_sum) * self.mu
-        
-        # Add AR terms
-        if self.include_ar and len(self.last_growth_rates) > 0:
-            for j in range(min(self.ar_lags, len(self.last_growth_rates))):
-                # last_growth_rates[-1] is most recent, [-2] is one before, etc.
-                predicted_growth += self.rho[j] * self.last_growth_rates[-(j+1)]
-        
-        # Add squared term (most recent growth rate only)
-        if self.include_ar_squared and len(self.last_growth_rates) > 0:
-            predicted_growth += self.beta * (self.last_growth_rates[-1] ** 2)
-        
-        # Add exogenous terms
-        if self.include_exog and X_next is not None and self.scaler is not None:
-            X_next = np.asarray(X_next, dtype=float).flatten().reshape(1, -1)
-            
-            # Handle NaN
-            if np.isnan(X_next).any() or np.isinf(X_next).any():
-                print("Warning: X_next contains NaN or Inf. Cleaning it...", X_next)
-                X_next = np.nan_to_num(X_next, nan=0.0, posinf=0.0, neginf=0.0)
-            
-            X_next_scaled = self.scaler.transform(X_next)
-            predicted_growth += np.dot(X_next_scaled[0], self.gamma)
-        
-        # Convert to level
-        y_pred = self.last_y * np.exp(predicted_growth)
-        
-        return float(y_pred)
-    
-    def forecast_horizon(
-        self,
-        start_year: int,
-        horizon: int,
-        df_features,
-        df_monthly,
-        feature_config: dict,
-        monthly_clients_lookup=None,
-    ):
-        preds = []
-
-        for h in range(1, horizon + 1):
-
-            target_year = start_year + h
-
-            # Build features for the forecast year
-            x_next = build_growth_rate_features(
-                years=[target_year],
-                df_features=df_features,
-                df_monthly=df_monthly,
-                clients_lookup=monthly_clients_lookup,
-                **feature_config
-            )
-
-            # Convert to numpy if available
-            if x_next is not None:
-                x_next = np.asarray(x_next, dtype=float)
-                x_input = x_next[0]
-            else:
-                x_input = None
-
-            # Predict annual consumption level
-            y_pred = self.predict(x_input)
-
-            preds.append((target_year, y_pred))
-
-            # Update internal state for iterative forecasts
-            predicted_growth_rate = np.log(y_pred) - np.log(self.last_y)
-            self.last_growth_rates = np.append(self.last_growth_rates, predicted_growth_rate)[-self.ar_lags:]
-            self.last_y = y_pred
-
-        return preds
-
-    def get_params(self) -> Dict:
-        """Get model parameters split into hyper and fitted groups."""
-        hyper = {
-            'include_ar': getattr(self, 'include_ar', None),
-            'ar_lags': getattr(self, 'ar_lags', None),
-            'include_ar_squared': getattr(self, 'include_ar_squared', None),
-            'include_exog': getattr(self, 'include_exog', None),
-            'l2_penalty': getattr(self, 'l2_penalty', None),
-            'use_asymmetric_loss': getattr(self, 'use_asymmetric_loss', None),
-            'underestimation_penalty': getattr(self, 'underestimation_penalty', None),
-        }
-
-        fitted = {
-            'mu': getattr(self, 'mu', None),
-            'rho': getattr(self, 'rho', None),
-            'beta': getattr(self, 'beta', None),
-            'gamma': getattr(self, 'gamma', None),
-        }
-
-        # Compute half-life for AR(1) if possible
-        try:
-            if hyper.get('include_ar') and hyper.get('ar_lags') == 1:
-                rho_vec = fitted.get('rho')
-                rho_val = None
-                if rho_vec is not None:
-                    # rho might be a list/array
-                    rho_val = rho_vec[0] if hasattr(rho_vec, '__len__') and len(rho_vec) > 0 else rho_vec
-                fitted['half_life'] = -np.log(2) / np.log(rho_val) if rho_val is not None and rho_val > 0 else np.inf
-        except Exception:
-            fitted['half_life'] = None
-
-        return {
-            'hyper_params': hyper,
-            'fitted_params': fitted,
-        }
-
-
-class PCAMeanRevertingGrowthModel(ParamIntrospectionMixin, BaseForecastModel):
-    """
-    PCA-based mean-reverting growth rate model.
-    
-    Transforms 12 monthly values into n_pcs principal components, predicts each PC
-    using the AR(p) growth model, then reconstructs the 12 monthly values.
-    
-    Model for each PC: Δlog(PC_{i,t}) = (1-Σρ_{i,j})μ_i + Σ(ρ_{i,j} * Δlog(PC_{i,t-j})) + β_i*[Δlog(PC_{i,t-1})]² + z_t'γ_i + ε
-    
-    Parameters:
-        - n_pcs: Number of principal components to use (default 2)
-        - pca_lambda: Power weight for PCA fitting (default 1.0, higher = more recent weight)
-        - Each PC has its own MeanRevertingGrowthModel
-    """
-
-    SUPPORTED_HYPERPARAMS = {
-    "n_pcs",
-    "pca_lambda",
-    
-    # submodel parameters
-    "include_ar",
-    "ar_lags",
-    "include_ar_squared",
-    "include_exog",
-    "l2_penalty",
-    "beta_bounds",
-    "use_asymmetric_loss",
-    "underestimation_penalty",
-}
-
-        
-    def __init__(self,
-                 n_pcs: int = 2,
-                 pca_lambda: float = 0.3,
-                 include_ar: bool = True,
-                 ar_lags: int = 1,
-                 include_ar_squared: bool = False,
-                 include_exog: bool = True,
-                 l2_penalty: float = 1.0,
-                 beta_bounds: Tuple[float, float] = (-1.0, 1.0),
-                 use_asymmetric_loss: bool = False,
-                 underestimation_penalty: float = 2.0, **kwargs):
-        
-        self._process_init(locals(), PCAMeanRevertingGrowthModel)
-
-
-        self.n_pcs = n_pcs
-        self.pca_lambda = pca_lambda
-        
-        # Store model parameters for each PC
-        self.model_params = {
-            'include_ar': include_ar,
-            'ar_lags': ar_lags,
-            'include_ar_squared': include_ar_squared,
-            'include_exog': include_exog,
-            'l2_penalty': l2_penalty,
-            'beta_bounds': beta_bounds,
-            'use_asymmetric_loss': use_asymmetric_loss,
-            'underestimation_penalty': underestimation_penalty,
-        }
-        
-        # PCA components
-        self.scaler_pca = None
-        self.pca_model = None
-        self.effective_n_pcs = None
-        
-        # One model per PC component
-        self.pc_models = []
-        
-        # Store years for weighting
-        self.years = None
-        
-    def _compute_power_weights(self, years: np.ndarray, lambda_value: float) -> np.ndarray:
-        """
-        Compute power-based weights (lambda^k) so recent years have more influence.
-        The most recent year receives exponent 0, the next receives 1, etc.
-        """
-        years = np.asarray(years)
-        n_years = years.shape[0]
-        if n_years == 0:
-            return np.array([], dtype=float)
-
-        if lambda_value is None:
-            return np.ones(n_years, dtype=float)
-
-        if lambda_value < 0:
-            raise ValueError("lambda_value must be non-negative for power weights.")
-
-        order = np.argsort(np.argsort(years))
-        exponents = (n_years - 1) - order
-        weights = np.power(lambda_value, exponents, dtype=float)
-
-        if not np.isfinite(weights).all() or weights.sum() <= 0:
-            weights = np.ones(n_years, dtype=float)
-
-        return weights
-    
-    def _fit_weighted_pca(self, X_scaled: np.ndarray, weights: np.ndarray, n_components: int):
-        """
-        Fit PCA with sample weights.
-        
-        Args:
-            X_scaled: Standardized data (n_samples, n_features)
-            weights: Sample weights (n_samples,)
-            n_components: Number of components
-        
-        Returns:
-            PCA model
-        """
-        # Weighted covariance matrix
-        X_weighted = X_scaled * np.sqrt(weights[:, np.newaxis])
-        
-        # Compute SVD
-        U, S, Vt = np.linalg.svd(X_weighted, full_matrices=False)
-        
-        # Store components
-        n_components = min(n_components, len(S))
-        
-        pca_dict = {
-            'components_': Vt[:n_components],
-            'explained_variance_': (S[:n_components] ** 2) / (len(weights) - 1),
-            'mean_': np.zeros(X_scaled.shape[1]),  # Already centered by StandardScaler
-            'n_components_': n_components
-        }
-        
-        return pca_dict
-    
-    def _weighted_pca_transform(self, pca_dict, X_scaled: np.ndarray) -> np.ndarray:
-        """Transform data using fitted PCA."""
-        return np.dot(X_scaled, pca_dict['components_'].T)
-    
-    def _weighted_pca_inverse_transform(self, pca_dict, X_pca: np.ndarray) -> np.ndarray:
-        """Inverse transform from PC space to original space."""
-        return np.dot(X_pca, pca_dict['components_'])
-    
-    def fit(self, *, y = None, monthly_matrix=None, years=None, X=None, **kwargs):
-        """
-        Fit the PCA-based growth model.
-        
-        Args:
-            monthly_matrix: Monthly consumption data (shape: n_years, 12)
-            years: Array of years corresponding to each row
-            X: Exogenous features (shape: n_years, k) - optional
-        """
-        monthly_matrix = np.asarray(monthly_matrix, dtype=float)
-        years = np.asarray(years, dtype=int)
-        self.years = years
-        
-        if monthly_matrix.shape[0] != len(years):
-            raise ValueError("Number of rows in monthly_matrix must match length of years")
-        
-        if monthly_matrix.shape[1] != 12:
-            raise ValueError("monthly_matrix must have 12 columns (one per month)")
-        
-        # Step 1: Fit PCA on monthly data
-        self.scaler_pca = StandardScaler()
-        monthly_scaled = self.scaler_pca.fit_transform(monthly_matrix)
-        
-        # Compute sample weights based on years
-        sample_weights = self._compute_power_weights(years, self.pca_lambda)
-        
-        # Fit weighted PCA
-        self.pca_model = self._fit_weighted_pca(monthly_scaled, sample_weights, self.n_pcs)
-        
-        # Transform to PC space
-        pc_scores = self._weighted_pca_transform(self.pca_model, monthly_scaled)
-        self.effective_n_pcs = pc_scores.shape[1]
-        
-        # Step 2: Fit a growth model for each PC component
-        self.pc_models = []
-        
-        for pc_idx in range(self.effective_n_pcs):
-            # Get PC scores as "consumption levels"
-            pc_levels = pc_scores[:, pc_idx]
-            
-            # Handle exogenous features for this PC
-            # For PC0 (first component), use all features
-            # For other PCs, you might want different features or same features
-            X_pc = X if X is not None else None
-            
-            # Create and fit model for this PC
-            model = RawMeanRevertingGrowthModel(**self.model_params)
-            
-            try:
-                model.fit(y = pc_levels, X = X_pc)
-                self.pc_models.append(model)
-            except Exception as e:
-                # print(f"⚠️  Warning: Could not fit model for PC{pc_idx}: {e}")
-                # Create a dummy model that predicts the mean
-                dummy_model = RawMeanRevertingGrowthModel(
-                    include_ar=False,
-                    include_exog=False
-                )
-                dummy_model.fit(y = pc_levels)
-                self.pc_models.append(dummy_model)
-        
-        return self
-    
-    def _predict_monthly(self, X_next: Optional[np.ndarray] = None) -> np.ndarray:
-        """
-        Predict next year's monthly consumption.
-        
-        Args:
-            X_next: Exogenous features for next period (shape: k,) - optional
-        
-        Returns:
-            Predicted monthly consumption (shape: 12,)
-        """
-        if self.pca_model is None or len(self.pc_models) == 0:
-            raise ValueError("Model must be fitted before prediction")
-        
-        # Step 1: Predict each PC component
-        predicted_pcs = np.zeros(self.effective_n_pcs)
-        
-        for pc_idx in range(self.effective_n_pcs):
-            model = self.pc_models[pc_idx]
-            
-            # Predict PC level (not growth rate)
-            X_pc = X_next if X_next is not None else None
-            predicted_pcs[pc_idx] = model.predict(X_pc)
-        
-        # Step 2: Reconstruct monthly values from predicted PCs
-        reconstructed_scaled = self._weighted_pca_inverse_transform(
-            self.pca_model, 
-            predicted_pcs.reshape(1, -1)
-        )
-        
-        # Inverse transform to original scale
-        reconstructed = self.scaler_pca.inverse_transform(reconstructed_scaled)[0]
-        
-        return reconstructed
-    
-    def predict(self, X_next: Optional[np.ndarray] = None) -> float:
-        monthly_prediction = self._predict_monthly(X_next)
-        return float(np.sum(monthly_prediction))
-    
-    def _forecast_horizon_monthly(
-        self,
-        start_year: int,
-        horizon: int,
-        df_features,
-        df_monthly,
-        feature_config: dict,
-        monthly_clients_lookup=None,
-    ):
-        """
-        Multi-step ahead forecasting.
-        
-        Args:
-            start_year: Year to start forecasting from
-            horizon: Number of years to forecast
-            df_features: DataFrame with exogenous features
-            df_monthly: DataFrame with monthly data
-            feature_config: Configuration for feature building
-            monthly_clients_lookup: Optional client data
-        
-        Returns:
-            List of tuples (year, predicted_monthly_array)
-        """
-        preds = []
-
-        for h in range(1, horizon + 1):
-            target_year = start_year + h
-
-            # Build features for the forecast year
-            x_next = build_growth_rate_features(
-                years=[target_year],
-                df_features=df_features,
-                df_monthly=df_monthly,
-                clients_lookup=monthly_clients_lookup,
-                **feature_config
-            )
-
-            # Convert to numpy if available
-            if x_next is not None:
-                x_next = np.asarray(x_next, dtype=float)
-                x_input = x_next[0]
-            else:
-                x_input = None
-
-            # Predict monthly consumption (returns array of 12 values)
-            monthly_pred = self._predict_monthly(x_input)
-            
-            preds.append((target_year, monthly_pred))
-
-            # Update internal state for each PC model
-            # Transform predicted monthly to PC space
-            monthly_scaled = self.scaler_pca.transform(monthly_pred.reshape(1, -1))
-            pc_scores_pred = self._weighted_pca_transform(self.pca_model, monthly_scaled)[0]
-            
-            # Update each PC model's state
-            for pc_idx in range(self.effective_n_pcs):
-                model = self.pc_models[pc_idx]
-                
-                # Get current and previous PC level
-                current_pc_level = pc_scores_pred[pc_idx]
-                previous_pc_level = model.last_y
-                
-                # Compute growth rate for this PC
-                predicted_growth_rate = current_pc_level - previous_pc_level
-                
-                # Update the model's state
-                # For AR(p), we need to update the vector of last growth rates
-                if model.include_ar and model.ar_lags > 1:
-                    # Shift the growth rates and add new one
-                    model.last_growths = np.append(
-                        model.last_growths[1:], 
-                        predicted_growth_rate
-                    )
-                elif model.include_ar:
-                    # For AR(1), just update the single value
-                    model.last_growths = np.array([predicted_growth_rate])
-                
-                # Update last level
-                model.last_y = current_pc_level
-
-        return preds
-    
-    def forecast_horizon(
-        self,
-        start_year: int,
-        horizon: int,
-        df_features,
-        df_monthly,
-        feature_config: dict,
-        monthly_clients_lookup=None,
-    ):
-        monthly_preds = self._forecast_horizon_monthly(
-            start_year=start_year,
-            horizon=horizon,
-            df_features=df_features,
-            df_monthly=df_monthly,
-            feature_config=feature_config,
-            monthly_clients_lookup=monthly_clients_lookup,
-        )
-
-        preds = []
-        for target_year, monthly_pred in monthly_preds:
-            annual_pred = np.sum(monthly_pred)
-            preds.append((target_year, annual_pred))
-        
-        return preds
-
-    def predict_with_actual_pcs(self, actual_monthly: np.ndarray) -> np.ndarray:
-        """
-        Helper method: Transform actual monthly data to PCs and reconstruct.
-        Useful for debugging and understanding PCA reconstruction error.
-        
-        Args:
-            actual_monthly: Actual monthly consumption (shape: 12,)
-        
-        Returns:
-            Reconstructed monthly consumption (shape: 12,)
-        """
-        if self.pca_model is None:
-            raise ValueError("Model must be fitted before prediction")
-        
-        # Transform to PC space
-        monthly_scaled = self.scaler_pca.transform(actual_monthly.reshape(1, -1))
-        pc_scores = self._weighted_pca_transform(self.pca_model, monthly_scaled)
-        
-        # Reconstruct
-        reconstructed_scaled = self._weighted_pca_inverse_transform(
-            self.pca_model,
-            pc_scores
-        )
-        reconstructed = self.scaler_pca.inverse_transform(reconstructed_scaled)[0]
-        
-        return reconstructed
-    
-    def get_pc_scores(self, monthly_matrix: np.ndarray) -> np.ndarray:
-        """
-        Transform monthly data to PC scores.
-        
-        Args:
-            monthly_matrix: Monthly consumption data (shape: n_years, 12)
-        
-        Returns:
-            PC scores (shape: n_years, n_pcs)
-        """
-        if self.pca_model is None:
-            raise ValueError("Model must be fitted first")
-        
-        monthly_scaled = self.scaler_pca.transform(monthly_matrix)
-        return self._weighted_pca_transform(self.pca_model, monthly_scaled)
-    
-    def get_params(self) -> Dict:
-        """Return hyper and fitted parameters for the PCA-based model."""
-        hyper = {
-            'n_pcs': getattr(self, 'n_pcs', None),
-            'pca_lambda': getattr(self, 'pca_lambda', None),
-            'model_params': getattr(self, 'model_params', None),
-        }
-
-        fitted = {
-            'effective_n_pcs': getattr(self, 'effective_n_pcs', None),
-            'pc_models': [],
-        }
-
-        # Add parameters for each PC model (as nested param dicts)
-        try:
-            pc_models = getattr(self, 'pc_models', []) or []
-            for model in pc_models:
-                try:
-                    fitted['pc_models'].append(model.get_params())
-                except Exception:
-                    fitted['pc_models'].append(None)
-        except Exception:
-            fitted['pc_models'] = None
-
-        # Add PCA explained variance if available
-        pca = getattr(self, 'pca_model', None)
-        if pca is not None:
-            try:
-                ev = pca.get('explained_variance_', None) if isinstance(pca, dict) else getattr(pca, 'explained_variance_', None)
-                fitted['explained_variance'] = ev
-                if ev is not None:
-                    total = np.sum(ev) if hasattr(ev, '__len__') else ev
-                    fitted['explained_variance_ratio'] = (ev / total) if total else None
-            except Exception:
-                fitted['explained_variance'] = None
-                fitted['explained_variance_ratio'] = None
-
-        return {
-            'hyper_params': hyper,
-            'fitted_params': fitted,
-        }
-    
-    def get_reconstruction_error(self, monthly_matrix: np.ndarray) -> Dict:
-        """
-        Calculate PCA reconstruction error.
-        
-        Args:
-            monthly_matrix: Monthly consumption data (shape: n_years, 12)
-        
-        Returns:
-            Dictionary with reconstruction metrics
-        """
-        if self.pca_model is None:
-            raise ValueError("Model must be fitted first")
-        
-        # Transform and reconstruct
-        monthly_scaled = self.scaler_pca.transform(monthly_matrix)
-        pc_scores = self._weighted_pca_transform(self.pca_model, monthly_scaled)
-        reconstructed_scaled = self._weighted_pca_inverse_transform(self.pca_model, pc_scores)
-        reconstructed = self.scaler_pca.inverse_transform(reconstructed_scaled)
-        
-        # Calculate errors
-        errors = monthly_matrix - reconstructed
-        mse = np.mean(errors ** 2)
-        mae = np.mean(np.abs(errors))
-        mape = np.mean(np.abs(errors / (monthly_matrix + 1e-10))) * 100
-        
-        return {
-            'mse': mse,
-            'mae': mae,
-            'mape': mape,
-            'max_error': np.max(np.abs(errors)),
-        }
-
-
-class AsymmetricAdaptiveTrendModel(ParamIntrospectionMixin, BaseForecastModel): # Inherit from your Mixins here
-    """
-    Asymmetric Adaptive Trend Model (AATM).
-    
-    Dynamics:
-        1. Gap calculation: Gap_t = log(y_t) - Trend_t
-        2. Asymmetric Reversion: α depends on whether Gap is + or -
-        3. Adaptive Trend: Trend leans into positive gaps (bubbles/growth) 
-           but resists negative gaps (crashes).
-
-    Parameters:
-        - mu_base: The fundamental long-run growth rate.
-        - alpha_down: Reversion speed when price < trend (Crash recovery).
-        - alpha_up: Reversion speed when price > trend (Bubble correction).
-        - beta_adapt: How much the trend 'leans in' to price increases.
-    """
-    
-    SUPPORTED_HYPERPARAMS = {
-        "include_exog",
-        "l2_penalty",
-        "alpha_down_bounds",
-        "alpha_up_bounds",
-        "beta_adapt_bounds",
-        "mu_bounds",
-        "use_asymmetric_loss",
-        "underestimation_penalty"
-    }
-
-    def __init__(self, 
-                 include_exog: bool = True,
-                 l2_penalty: float = 10.0,
-                 alpha_down_bounds: Tuple[float, float] = (0.05, 0.5), # Default strict
-                 alpha_up_bounds: Tuple[float, float] = (0.0, 0.2),   # Default lenient
-                 beta_adapt_bounds: Tuple[float, float] = (0.0, 0.5),
-                 mu_bounds: Tuple[float, float] = (0.0, None),
-                 use_asymmetric_loss: bool = False,
-                 underestimation_penalty: float = 2.0, 
-                 **kwargs):
-        
-        self._process_init(locals(), AsymmetricAdaptiveTrendModel) # Uncomment if using your Mixin
-
-        self.include_exog = include_exog
-        self.l2_penalty = l2_penalty
-        self.alpha_down_bounds = alpha_down_bounds
-        self.alpha_up_bounds = alpha_up_bounds
-        self.beta_adapt_bounds = beta_adapt_bounds
-        self.mu_bounds = mu_bounds
-        self.use_asymmetric_loss = use_asymmetric_loss
-        self.underestimation_penalty = underestimation_penalty
-        
-        # Fitted parameters
-        self.mu_base = None
-        self.alpha_down = None
-        self.alpha_up = None
-        self.beta_adapt = None
-        self.gamma = None
-        self.scaler = None
-        
-        # State for prediction
-        self.last_y = None
-        self.last_trend_level = None
-        self.last_dynamic_mu = None
-
-    def _reconstruct_path(self, params: np.ndarray, log_y: np.ndarray, 
-                          X_scaled: Optional[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Internal helper to simulate the trend path over history given specific parameters.
-        Returns: (y_pred_log_diff, final_state_tuple)
-        """
-        # 1. Unpack Parameters
-        idx = 0
-        mu_base = params[idx]; idx += 1
-        alpha_down = params[idx]; idx += 1
-        alpha_up = params[idx]; idx += 1
-        beta_adapt = params[idx]; idx += 1
-        
-        gamma = np.array([])
-        if self.include_exog and X_scaled is not None:
-            gamma = params[idx:]
-
-        T = len(log_y)
-        
-        # Initialize State variables
-        # We assume the trend started exactly where the price started
-        trend_level = log_y[0] 
-        dynamic_mu = mu_base
-        
-        predictions = []
-        
-        # 2. Iterate through history to build the dynamic trend
-        # We predict t+1 based on information at t
-        for t in range(T - 1):
-            # Current state at t
-            current_log_y = log_y[t]
-            
-            # A. Calculate Gap
-            gap = current_log_y - trend_level
-            
-            # B. Determine Asymmetric Alpha
-            if gap < 0:
-                current_alpha = alpha_down
-            else:
-                current_alpha = alpha_up
-                
-            # C. Update Trend (Adaptive)
-            # "Lean in" logic: if gap is positive, trend grows faster
-            upside_pressure = max(0, gap)
-            dynamic_mu = mu_base + (beta_adapt * upside_pressure)
-            
-            # The trend level for NEXT step (t+1)
-            trend_level = trend_level + dynamic_mu
-            
-            # D. Predict Growth for t+1
-            # Δlog(y) = Expected_Trend_Growth - Correction + Exog
-            pred_change = dynamic_mu - (current_alpha * gap)
-            
-            if self.include_exog and X_scaled is not None:
-                pred_change += np.dot(X_scaled[t], gamma)
-                
-            predictions.append(pred_change)
-
-        return np.array(predictions), (trend_level, dynamic_mu)
-
-    def _objective(self, params: np.ndarray, log_y: np.ndarray, 
-                   X_scaled: Optional[np.ndarray]) -> float:
-        
-        # Reconstruct the path to get predictions
-        y_pred_changes, _ = self._reconstruct_path(params, log_y, X_scaled)
-        
-        # True changes (actual growth rates)
-        # log_y has length T, so diff is T-1
-        y_true_changes = np.diff(log_y) 
-        
-        errors = y_true_changes - y_pred_changes
-        
-        # Compute Loss
-        if self.use_asymmetric_loss:
-            squared_errors = errors ** 2
-            underestimation_mask = errors > 0 
-            weighted_errors = squared_errors.copy()
-            weighted_errors[underestimation_mask] *= self.underestimation_penalty
-            loss = np.mean(weighted_errors)
-        else:
-            loss = np.mean(errors ** 2)
-            
-        # L2 Penalty on Gamma only
-        idx_gamma_start = 4 # mu, a_down, a_up, beta
-        if self.include_exog and len(params) > idx_gamma_start:
-            gamma_params = params[idx_gamma_start:]
-            l2_term = self.l2_penalty * np.sum(gamma_params ** 2)
-        else:
-            l2_term = 0.0
-            
-        return loss + l2_term
-
-    def fit(self, *, y=None, X=None, **kwargs):
-        y = np.asarray(y, dtype=float).flatten()
-        log_y = np.log(y)
-        
-        # --- Exogenous Feature Handling (Same as your code) ---
-        X_scaled = None
-        if self.include_exog and X is not None:
-            X = np.asarray(X, dtype=float)
-            if X.ndim == 1: X = X.reshape(-1, 1)
-            X_aligned = X[1:] # Align with predictions
-            
-            if np.isnan(X_aligned).any():
-                col_means = np.nanmean(X_aligned, axis=0)
-                for i in range(X_aligned.shape[1]):
-                    X_aligned[np.isnan(X_aligned[:, i]), i] = col_means[i]
-            
-            self.scaler = StandardScaler()
-            X_scaled = self.scaler.fit_transform(X_aligned)
-
-        # --- Initialization ---
-        # Guess mu based on average growth
-        mu_init = np.mean(np.diff(log_y))
-        
-        # [mu_base, alpha_down, alpha_up, beta_adapt]
-        params_init = [mu_init, 0.5, 0.1, 0.1] 
-        
-        bounds = [
-            self.mu_bounds,
-            self.alpha_down_bounds,
-            self.alpha_up_bounds,
-            self.beta_adapt_bounds
-        ]
-        
-        if self.include_exog and X_scaled is not None:
-            k = X_scaled.shape[1]
-            params_init.extend([0.0] * k)
-            bounds.extend([(None, None)] * k)
-
-        # --- Optimization ---
-        result = minimize(
-            fun=self._objective,
-            x0=np.array(params_init),
-            args=(log_y, X_scaled),
-            method='L-BFGS-B',
-            bounds=bounds,
-            options={'maxiter': 1000, 'ftol': 1e-9}
-        )
-
-        # --- Store Parameters ---
-        self.mu_base = result.x[0]
-        self.alpha_down = result.x[1]
-        self.alpha_up = result.x[2]
-        self.beta_adapt = result.x[3]
-        
-        if self.include_exog and X_scaled is not None:
-            self.gamma = result.x[4:]
-        else:
-            self.gamma = np.array([])
-
-        # --- CRITICAL: SET FINAL STATE ---
-        # We must run the path one last time to find out where the 
-        # Trend Level ended up at time T, so we can predict T+1.
-        _, final_state = self._reconstruct_path(result.x, log_y, X_scaled)
-        
-        self.last_trend_level = final_state[0] # Trend at T-1 (aligned for next step)
-        self.last_dynamic_mu = final_state[1]  # Growth used for next step
-        self.last_y = y[-1]
-        
-        return self
-
-    def predict(self, X_next: Optional[np.ndarray] = None) -> float:
-        """Predicts the next level y_{t+1} based on stored state."""
-        
-        # 1. Calculate Gap at the end of training (or previous step)
-        last_log_y = np.log(self.last_y)
-        gap = last_log_y - self.last_trend_level
-        
-        # 2. Determine Alpha
-        if gap < 0:
-            current_alpha = self.alpha_down
-        else:
-            current_alpha = self.alpha_up
-            
-        # 3. Calculate Prediction (Growth Rate)
-        # Δlog(y) = μ_dynamic - α * Gap + Exog
-        pred_growth = self.last_dynamic_mu - (current_alpha * gap)
-        
-        if self.include_exog and X_next is not None and self.scaler is not None:
-            X_next = np.asarray(X_next, dtype=float).flatten().reshape(1, -1)
-            if np.isnan(X_next).any(): X_next = np.nan_to_num(X_next, nan=0.0)
-            X_next_scaled = self.scaler.transform(X_next)
-            pred_growth += np.dot(X_next_scaled[0], self.gamma)
-            
-        # 4. Convert to Level
-        y_pred = self.last_y * np.exp(pred_growth)
-        
-        return float(y_pred)
-
-    def forecast_horizon(self, start_year: int, horizon: int, 
-                        df_features, df_monthly, feature_config: dict, 
-                        monthly_clients_lookup=None):
-        """
-        Iterative forecasting that updates the internal Trend state.
-        """
-        preds = []
-        
-        # We need to preserve the 'real' state to restore it after forecasting
-        # so we don't corrupt the model if we call predict() again
-        saved_y = self.last_y
-        saved_trend = self.last_trend_level
-        saved_mu = self.last_dynamic_mu
-
-        for h in range(1, horizon + 1):
-            target_year = start_year + h
-
-            # (Placeholder function call from your snippet)
-            # x_next = build_growth_rate_features(...) 
-            # For this snippet, I assume x_next is None or handled externally
-            x_input = None 
-
-            # 1. Predict Price
-            y_pred = self.predict(x_input)
-            preds.append((target_year, y_pred))
-
-            # 2. Update State for Next Iteration (t+2)
-            # We must simulate the Trend update logic here!
-            
-            # A. Current Gap (based on the prediction we just made)
-            log_y_pred = np.log(y_pred)
-            # Note: predict() used last_trend_level. Now we update trend for next step.
-            gap = np.log(self.last_y) - self.last_trend_level
-            
-            # B. Update Trend Expectations (Adaptive Logic)
-            upside_pressure = max(0, gap)
-            new_dynamic_mu = self.mu_base + (self.beta_adapt * upside_pressure)
-            
-            new_trend_level = self.last_trend_level + new_dynamic_mu
-            
-            # C. Commit State
-            self.last_y = y_pred
-            self.last_trend_level = new_trend_level
-            self.last_dynamic_mu = new_dynamic_mu
-
-        # Restore original state
-        self.last_y = saved_y
-        self.last_trend_level = saved_trend
-        self.last_dynamic_mu = saved_mu
-
-        return preds
-
-    "include_exog",
-    "l2_penalty",
-    "alpha_down_bounds",
-    "alpha_up_bounds",
-    "beta_adapt_bounds",
-    "mu_bounds",
-    "use_asymmetric_loss",
-    "underestimation_penalty"
-
-    def get_params(self) -> Dict:
-        hyper = {
-            'include_exog': getattr(self, 'include_exog', None),
-            'l2_penalty': getattr(self, 'l2_penalty', None),
-            'alpha_down_bounds': getattr(self, 'alpha_down_bounds', None),
-            'alpha_up_bounds': getattr(self, 'alpha_up_bounds', None),
-            'beta_adapt_bounds': getattr(self, 'beta_adapt_bounds', None),
-            'mu_bounds': getattr(self, 'mu_bounds', None),
-            'use_asymmetric_loss': getattr(self, 'use_asymmetric_loss', None),
-            'underestimation_penalty': getattr(self, 'underestimation_penalty', None),
-        }
-
-        fitted = {
-            'mu_base': getattr(self, 'mu_base', None),
-            'alpha_down': getattr(self, 'alpha_down', None),
-            'alpha_up': getattr(self, 'alpha_up', None),
-            'beta_adapt': getattr(self, 'beta_adapt', None),
-            'gamma': getattr(self, 'gamma', None),
-        }
-
-        return {
-            'hyper_params': hyper,
-            'fitted_params': fitted,
-        }
-
-
-
-class FullyAdaptiveTrendModel(ParamIntrospectionMixin, BaseForecastModel):
-    """
-    Fully Adaptive Trend Model.
-    
-    Treats Increases and Decreases with separate "Trend Adaptation" parameters.
-    Allows the trend line to bend UP for booms and DOWN for sustained crashes.
-    """
-    SUPPORTED_HYPERPARAMS = {
-        "include_exog",
-        "l2_penalty",
-        "alpha_down_bounds",
-        "alpha_up_bounds",
-        "beta_up_bounds",
-        "beta_down_bounds",
-        "mu_bounds",
-        "use_asymmetric_loss",
-        "underestimation_penalty"
-    }
-
-    def __init__(self, 
-                 include_exog: bool = True,
-                 l2_penalty: float = 10.0,
-                 # REVERSION SPEEDS (Alpha)
-                 alpha_down_bounds: Tuple[float, float] = (0.05, 0.4), # Default: Slow/U-shape recovery
-                 alpha_up_bounds: Tuple[float, float] = (0.0, 0.3),
-                 # TREND ADAPTATION (Beta)
-                 beta_up_bounds: Tuple[float, float] = (0.0, 0.5),    # How much to trust bubbles
-                 beta_down_bounds: Tuple[float, float] = (0.0, 0.5),  # How much to trust crashes
-                 mu_bounds: Tuple[float, float] = (0.0, None),
-                 use_asymmetric_loss: bool = False,
-                 underestimation_penalty: float = 2.0, 
-                 **kwargs):
-        
-        self._process_init(locals(), AsymmetricAdaptiveTrendModel) # Uncomment if using your Mixin
-
-        self.include_exog = include_exog
-        self.l2_penalty = l2_penalty
-        self.alpha_down_bounds = alpha_down_bounds
-        self.alpha_up_bounds = alpha_up_bounds
-        self.beta_up_bounds = beta_up_bounds
-        self.beta_down_bounds = beta_down_bounds
-        self.mu_bounds = mu_bounds
-        self.use_asymmetric_loss = use_asymmetric_loss
-        self.underestimation_penalty = underestimation_penalty
-        
-        # Fitted parameters
-        self.mu_base = None
-        self.alpha_down = None
-        self.alpha_up = None
-        self.beta_up = None
-        self.beta_down = None
-        self.gamma = None
-        self.scaler = None
-        
-        # State
-        self.last_y = None
-        self.last_trend_level = None
-        self.last_dynamic_mu = None
-
-    def _reconstruct_path(self, params: np.ndarray, log_y: np.ndarray, 
-                          X_scaled: Optional[np.ndarray]) -> Tuple[np.ndarray, np.ndarray]:
-        
-        # 1. Unpack Parameters (Order: mu, a_down, a_up, b_up, b_down, gamma...)
-        idx = 0
-        mu_base = params[idx]; idx += 1
-        alpha_down = params[idx]; idx += 1
-        alpha_up = params[idx]; idx += 1
-        beta_up = params[idx]; idx += 1
-        beta_down = params[idx]; idx += 1
-        
-        gamma = np.array([])
-        if self.include_exog and X_scaled is not None:
-            gamma = params[idx:]
-
-        T = len(log_y)
-        trend_level = log_y[0] 
-        dynamic_mu = mu_base
-        
-        predictions = []
-        
-        for t in range(T - 1):
-            current_log_y = log_y[t]
-            gap = current_log_y - trend_level
-            
-            # --- STEP A: Determine Reversion Speed (Alpha) ---
-            if gap < 0:
-                current_alpha = alpha_down
-            else:
-                current_alpha = alpha_up
-                
-            # --- STEP B: Determine Trend Adaptation (Beta) ---
-            # NEW: We allow the trend to react to both positive and negative gaps
-            upside_pressure = max(0, gap)
-            downside_pressure = min(0, gap) # This will be negative or 0
-            
-            # Update Mu: 
-            # If gap is negative (crash), downside_pressure is negative.
-            # beta_down * negative_value = reduces growth rate.
-            dynamic_mu = mu_base + (beta_up * upside_pressure) + (beta_down * downside_pressure)
-            
-            # Update Trend Level
-            trend_level = trend_level + dynamic_mu
-            
-            # --- STEP C: Predict ---
-            pred_change = dynamic_mu - (current_alpha * gap)
-            
-            if self.include_exog and X_scaled is not None:
-                pred_change += np.dot(X_scaled[t], gamma)
-                
-            predictions.append(pred_change)
-
-        return np.array(predictions), (trend_level, dynamic_mu)
-
-    def _objective(self, params: np.ndarray, log_y: np.ndarray, 
-                   X_scaled: Optional[np.ndarray]) -> float:
-        
-        y_pred_changes, _ = self._reconstruct_path(params, log_y, X_scaled)
-        y_true_changes = np.diff(log_y) 
-        errors = y_true_changes - y_pred_changes
-        
-        if self.use_asymmetric_loss:
-            squared_errors = errors ** 2
-            underestimation_mask = errors > 0 
-            weighted_errors = squared_errors.copy()
-            weighted_errors[underestimation_mask] *= self.underestimation_penalty
-            loss = np.mean(weighted_errors)
-        else:
-            loss = np.mean(errors ** 2)
-            
-        # L2 Penalty (Skip first 5 params: mu, a_d, a_u, b_u, b_d)
-        idx_gamma_start = 5 
-        if self.include_exog and len(params) > idx_gamma_start:
-            gamma_params = params[idx_gamma_start:]
-            l2_term = self.l2_penalty * np.sum(gamma_params ** 2)
-        else:
-            l2_term = 0.0
-            
-        return loss + l2_term
-
-    def fit(self, *, y=None, X=None, **kwargs):
-        y = np.asarray(y, dtype=float).flatten()
-        log_y = np.log(y)
-        
-        # Exogenous handling (standard boilerplate)
-        X_scaled = None
-        if self.include_exog and X is not None:
-            X = np.asarray(X, dtype=float)
-            if X.ndim == 1: X = X.reshape(-1, 1)
-            X_aligned = X[1:] 
-            if np.isnan(X_aligned).any():
-                col_means = np.nanmean(X_aligned, axis=0)
-                for i in range(X_aligned.shape[1]):
-                    X_aligned[np.isnan(X_aligned[:, i]), i] = col_means[i]
-            self.scaler = StandardScaler()
-            X_scaled = self.scaler.fit_transform(X_aligned)
-
-        # Init Params: [mu, alpha_down, alpha_up, beta_up, beta_down]
-        mu_init = np.mean(np.diff(log_y))
-        params_init = [mu_init, 0.2, 0.2, 0.1, 0.1] 
-        
-        bounds = [
-            self.mu_bounds,
-            self.alpha_down_bounds,
-            self.alpha_up_bounds,
-            self.beta_up_bounds,
-            self.beta_down_bounds # New Bound
-        ]
-        
-        if self.include_exog and X_scaled is not None:
-            k = X_scaled.shape[1]
-            params_init.extend([0.0] * k)
-            bounds.extend([(None, None)] * k)
-
-        result = minimize(
-            fun=self._objective,
-            x0=np.array(params_init),
-            args=(log_y, X_scaled),
-            method='L-BFGS-B',
-            bounds=bounds,
-            options={'maxiter': 1000, 'ftol': 1e-9}
-        )
-
-        self.mu_base = result.x[0]
-        self.alpha_down = result.x[1]
-        self.alpha_up = result.x[2]
-        self.beta_up = result.x[3]
-        self.beta_down = result.x[4]
-        
-        if self.include_exog and X_scaled is not None:
-            self.gamma = result.x[5:]
-        else:
-            self.gamma = np.array([])
-
-        _, final_state = self._reconstruct_path(result.x, log_y, X_scaled)
-        self.last_trend_level = final_state[0]
-        self.last_dynamic_mu = final_state[1]
-        self.last_y = y[-1]
-        
-        return self
-
-    def predict(self, X_next: Optional[np.ndarray] = None) -> float:
-        last_log_y = np.log(self.last_y)
-        gap = last_log_y - self.last_trend_level
-        
-        # Alpha Logic
-        current_alpha = self.alpha_down if gap < 0 else self.alpha_up
-            
-        # Predict Growth
-        pred_growth = self.last_dynamic_mu - (current_alpha * gap)
-        
-        if self.include_exog and X_next is not None and self.scaler is not None:
-            X_next = np.asarray(X_next, dtype=float).flatten().reshape(1, -1)
-            if np.isnan(X_next).any(): X_next = np.nan_to_num(X_next, nan=0.0)
-            X_next_scaled = self.scaler.transform(X_next)
-            pred_growth += np.dot(X_next_scaled[0], self.gamma)
-            
-        return float(self.last_y * np.exp(pred_growth))
-    
-    def forecast_horizon(
-        self,
-        start_year: int,
-        horizon: int,
-        df_features,
-        df_monthly,
-        feature_config: dict,
-        monthly_clients_lookup=None,
-    ):
-        """
-        Iterative forecasting that updates the internal Trend state based on predictions.
-        
-        It simulates the "Feedback Loop":
-        1. Predict Price for Year X
-        2. Calculate the Gap (Price - Trend)
-        3. Adjust the Trend for Year X+1 (using beta_up/beta_down) based on that Gap.
-        """
-        preds = []
-        
-        # --- 1. STATE PRESERVATION ---
-        # We save the model's actual state (from training) so we can restore it 
-        # after the simulation. We don't want the forecast loop to permanently 
-        # alter the fitted model.
-        saved_y = self.last_y
-        saved_trend = self.last_trend_level
-        saved_mu = self.last_dynamic_mu
-
-        # --- 2. FORECAST LOOP ---
-        for h in range(1, horizon + 1):
-            target_year = start_year + h
-
-            # A. Prepare Features (Assumes your existing helper function)
-            # You might need to import build_growth_rate_features or define it
-            try:
-                x_next = build_growth_rate_features(
-                    years=[target_year],
-                    df_features=df_features,
-                    df_monthly=df_monthly,
-                    clients_lookup=monthly_clients_lookup,
-                    **feature_config
-                )
-                if x_next is not None:
-                    x_next = np.asarray(x_next, dtype=float)
-                    x_input = x_next[0]
-                else:
-                    x_input = None
-            except NameError:
-                # Fallback if function not defined in scope
-                x_input = None
-
-            # B. Predict Price (Step T+1)
-            # This uses the current self.last_trend_level and self.last_dynamic_mu
-            y_pred = self.predict(x_input)
-            preds.append((target_year, y_pred))
-
-            # C. UPDATE STATE FOR NEXT STEP (Step T+2)
-            # We must simulate how the Trend would react to this prediction.
-            
-            # 1. Calculate the Gap created by our prediction
-            # Note: self.last_trend_level is currently the trend for the prediction year
-            log_y_pred = np.log(y_pred)
-            gap = log_y_pred - self.last_trend_level
-            
-            # 2. Update Growth Expectation (Adaptive Logic)
-            # This is where beta_up vs beta_down matters!
-            upside_pressure = max(0, gap)
-            downside_pressure = min(0, gap) # Negative or Zero
-            
-            new_dynamic_mu = self.mu_base + \
-                             (self.beta_up * upside_pressure) + \
-                             (self.beta_down * downside_pressure)
-            
-            # 3. Update Trend Level
-            # The trend for the *next* year grows by this new mu
-            new_trend_level = self.last_trend_level + new_dynamic_mu
-            
-            # 4. Commit Temporary State
-            self.last_y = y_pred
-            self.last_trend_level = new_trend_level
-            self.last_dynamic_mu = new_dynamic_mu
-
-        # --- 3. STATE RESTORATION ---
-        self.last_y = saved_y
-        self.last_trend_level = saved_trend
-        self.last_dynamic_mu = saved_mu
-
-        return preds
-    
-    def get_params(self) -> Dict:
-        # REVERSION SPEEDS (Alpha)
-                 
-        hyper = {
-            'include_exog': getattr(self, 'include_exog', None),
-            'l2_penalty': getattr(self, 'l2_penalty', None),
-            'alpha_down_bounds': getattr(self, 'alpha_down_bounds', None),
-            'alpha_up_bounds': getattr(self, 'alpha_up_bounds', None),
-            'beta_up_bounds': getattr(self, 'beta_up_bounds', None),
-            'beta_down_bounds': getattr(self, 'beta_down_bounds', None),
-            'mu_bounds': getattr(self, 'mu_bounds', None),
-            'use_asymmetric_loss': getattr(self, 'use_asymmetric_loss', None),
-            'underestimation_penalty': getattr(self, 'underestimation_penalty', None),
-        }
-
-        fitted = {
-            'mu_base': getattr(self, 'mu_base', None),
-            'alpha_down': getattr(self, 'alpha_down', None),
-            'alpha_up': getattr(self, 'alpha_up', None),
-            'beta_up': getattr(self, 'beta_up', None),
-            'beta_down': getattr(self, 'beta_down', None),
-            'gamma': getattr(self, 'gamma', None),
-        }
 
         return {
             'hyper_params': hyper,

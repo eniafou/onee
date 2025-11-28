@@ -167,13 +167,18 @@ def run_annual_loocv_grid_search(
                     # Predict annual
                     # ---------------------------------------------------------
                     try:
-                        if GrowthModelClass.__name__ == "GaussianProcessForecastModel":
+                        if GrowthModelClass.__name__ in ["GaussianProcessForecastModel", "IntensityForecastWrapper"]:
                             if test_features_array is None:
                                 test_features_array = np.array(test_year).reshape(1, -1)
                             else:
                                 test_features_array = np.hstack([np.array(test_year), test_features_array])
                         
-                        pred_annual = model.predict(test_features_array)
+                        value = df_features.loc[df_features["annee"] == test_year].get("total_active_contrats")
+                        if value is not None:
+                            if  len(value) != 1: 
+                                raise ValueError("Expected exactly one matching row.")
+                            value = value.item()
+                        pred_annual = model.predict(test_features_array, normalization_factor = value)
                     except Exception as e:
                         if verbose:
                             print(f"Error predicting year {test_year}:", e)
