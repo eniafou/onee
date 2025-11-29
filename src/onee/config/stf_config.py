@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import List, Dict, Optional, Tuple
 from pydantic import BaseModel, Field, field_validator
 import yaml
+from onee.data.names import Aliases
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -32,7 +33,7 @@ class ProjectConfig(BaseModel):
 
 class DataConfig(BaseModel):
     """Data sources, target variables, and processing"""
-    variable: str = "consommation_kwh"
+    variable: str = Aliases.CONSOMMATION_KWH
     unit: str = "Kwh"
     
     # For SRM: list of regions; for CD: None
@@ -66,9 +67,9 @@ class FeatureConfig(BaseModel):
     feature_blocks: Dict[str, List[str]] = Field(
         default={
             'none': [],
-            'gdp_only': ['pib_mdh'],
-            'sectoral_only': ['gdp_primaire', 'gdp_secondaire', 'gdp_tertiaire'],
-            'gdp_sectoral': ['pib_mdh', 'gdp_primaire', 'gdp_secondaire', 'gdp_tertiaire'],
+            'gdp_only': [Aliases.PIB_MDH],
+            'sectoral_only': [Aliases.GDP_PRIMAIRE, Aliases.GDP_SECONDAIRE, Aliases.GDP_TERTIAIRE],
+            'gdp_sectoral': [Aliases.PIB_MDH, Aliases.GDP_PRIMAIRE, Aliases.GDP_SECONDAIRE, Aliases.GDP_TERTIAIRE],
         }
     )
     

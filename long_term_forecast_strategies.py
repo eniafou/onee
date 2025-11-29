@@ -3,6 +3,7 @@ from onee.growth_rate_model import (
     build_growth_rate_features,
 )
 from onee.utils import select_best_model, calculate_all_annual_metrics
+from onee.data.names import Aliases
 import numpy as np
 
 def run_annual_loocv_grid_search(
@@ -173,11 +174,14 @@ def run_annual_loocv_grid_search(
                             else:
                                 test_features_array = np.hstack([np.array(test_year), test_features_array])
                         
-                        value = df_features.loc[df_features["annee"] == test_year].get("total_active_contrats")
-                        if value is not None:
-                            if  len(value) != 1: 
-                                raise ValueError("Expected exactly one matching row.")
-                            value = value.item()
+                        if "normalization_col" not in model_config_dict:
+                            value = None
+                        else:
+                            value = df_features.loc[df_features[Aliases.ANNEE] == test_year].get(model_config_dict["normalization_col"])
+                            if value is not None:
+                                if  len(value) != 1: 
+                                    raise ValueError("Expected exactly one matching row.")
+                                value = value.item()
                         pred_annual = model.predict(test_features_array, normalization_factor = value)
                     except Exception as e:
                         if verbose:
@@ -286,7 +290,7 @@ def run_long_horizon_forecast(
         df_features=df_features,
         clients_lookup=monthly_clients_lookup,
         df_monthly=df_monthly,
-        **best_result["feature_config"],   # includes feature_blocks, transforms, lags, etc.
+        **best_result["feature_config"],   # includes feature_block, transforms, lags, etc.
     )
     BestModelClass = best_result["model_class"]
 
@@ -338,7 +342,7 @@ def run_long_horizon_forecast(
             title=region_entity,
             save_plot=True,
             save_folder=save_folder,
-            df_monthly=df_monthly.rename(columns={"consommation":"consommation_kwh"})
+            df_monthly=df_monthly
         )
 
     return {

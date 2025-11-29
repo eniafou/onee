@@ -13,6 +13,7 @@ from sklearn.preprocessing import StandardScaler
 import numpy as np
 import pandas as pd
 from onee.utils import get_move_in_year
+from onee.data.names import Aliases
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.multioutput import MultiOutputRegressor
 
@@ -24,9 +25,9 @@ def _extract_pf_pa_ratio_cons(first_year):
     If any series has fewer than 12 months or the combined feature vector sums to 0,
     returns None.
     """
-    pf = first_year.sort_values("mois")["puissance facturée"].fillna(0).values[:12]
-    pa = first_year.sort_values("mois")["puissance appelée"].fillna(0).values[:12]
-    cons = first_year.sort_values("mois")["consommation"].fillna(0).values[:12]
+    pf = first_year.sort_values(Aliases.MOIS)[Aliases.PUISSANCE_FACTUREE].fillna(0).values[:12]
+    pa = first_year.sort_values(Aliases.MOIS)[Aliases.PUISSANCE_APPELEE].fillna(0).values[:12]
+    cons = first_year.sort_values(Aliases.MOIS)[Aliases.CONSOMMATION_KWH].fillna(0).values[:12]
 
     if len(pf) < 12 or len(pa) < 12 or len(cons) < 12:
         return None
@@ -50,19 +51,19 @@ def _collect_starting_samples(df_scope):
     first 12 months using _extract_pf_pa_ratio_cons and return lists of
     feature vectors (24 = 12 PF + 12 PA/PF ratios) and targets (12 months cons).
     """
-    contrats = df_scope["contrat"].unique()
+    contrats = df_scope[Aliases.CONTRAT].unique()
     X_list, y_list = [], []
 
     for c in contrats:
-        sub = df_scope[df_scope["contrat"] == c].sort_values(["annee", "mois"]) 
-        if sub.empty or sub["Date d'emménagement"].isna().all():
+        sub = df_scope[df_scope[Aliases.CONTRAT] == c].sort_values([Aliases.ANNEE, Aliases.MOIS]) 
+        if sub.empty or sub[Aliases.DATE_EMMENAGEMENT].isna().all():
             continue
 
         start_year = get_move_in_year(sub)
         if pd.isna(start_year) or start_year == 2023 or start_year < 2018: 
             continue
 
-        first_year = sub[sub["annee"] == start_year].copy()
+        first_year = sub[sub[Aliases.ANNEE] == start_year].copy()
         if first_year.empty:
             continue
 
@@ -80,20 +81,20 @@ def _collect_starting_samples(df_scope):
     return X_list, y_list
 
 def _collect_starting_samples_growth(df_scope, use_ratio=False):
-    contrats = df_scope["contrat"].unique()
+    contrats = df_scope[Aliases.CONTRAT].unique()
     X_list, y_list = [], []
 
     for c in contrats:
-        sub = df_scope[df_scope["contrat"] == c].sort_values(["annee", "mois"])
-        if sub.empty or sub["Date d'emménagement"].isna().all():
+        sub = df_scope[df_scope[Aliases.CONTRAT] == c].sort_values([Aliases.ANNEE, Aliases.MOIS])
+        if sub.empty or sub[Aliases.DATE_EMMENAGEMENT].isna().all():
             continue
 
         start_year = get_move_in_year(sub)
         if pd.isna(start_year) or (start_year + 1) >= 2023 or start_year < 2018:
             continue
 
-        first_year = sub[sub["annee"] == start_year].copy()
-        second_year = sub[sub["annee"] == start_year + 1].copy()
+        first_year = sub[sub[Aliases.ANNEE] == start_year].copy()
+        second_year = sub[sub[Aliases.ANNEE] == start_year + 1].copy()
         if first_year.empty or second_year.empty:
             continue
 
@@ -104,7 +105,7 @@ def _collect_starting_samples_growth(df_scope, use_ratio=False):
         if pf.sum() == 0:
             continue
 
-        cons_next = second_year.sort_values("mois")["consommation"].fillna(0).values[:12]
+        cons_next = second_year.sort_values(Aliases.MOIS)[Aliases.CONSOMMATION_KWH].fillna(0).values[:12]
         if len(cons_next) < 12:
             continue
 
@@ -121,7 +122,7 @@ def _collect_starting_samples_growth(df_scope, use_ratio=False):
 
 
 
-def handle_similarity_entity_prediction(df, all_results_established, entity_id, level_type="contrat", save_csv = True):
+def handle_similarity_entity_prediction(df, all_results_established, entity_id, level_type=None, save_csv = True):
     """
     Generic handler for similarity entities (2023 starters).
     Replaced clustering with a small predictive model:
@@ -129,8 +130,10 @@ def handle_similarity_entity_prediction(df, all_results_established, entity_id, 
     the starting 12-month puissance facturée and optionally the PA/PF ratio (pa/pf).
     By default `use_ratio` is False and only PF months are used as features.
     """
-    if level_type not in ["contrat", "activite"]:
-        raise ValueError("level_type must be either 'contrat' or 'activite'.")
+    if level_type is None:
+        level_type = Aliases.CONTRAT
+    if level_type not in [Aliases.CONTRAT, Aliases.ACTIVITE]:
+        raise ValueError(f"level_type must be either '{Aliases.CONTRAT}' or '{Aliases.ACTIVITE}'.")
 
     df_entity = df[df[level_type] == entity_id].copy()
     if df_entity.empty:
@@ -141,10 +144,10 @@ def handle_similarity_entity_prediction(df, all_results_established, entity_id, 
     print(f"\n🔗 Handling similarity {label}: {entity_id}")
 
     # === Filter by activity if possible ===
-    if level_type == "contrat":
-        activite = df_entity["activite"].iloc[0]
-        df_same_activity = df[df["activite"] == activite].copy()
-        contrats_in_activity = df_same_activity["contrat"].unique().tolist()
+    if level_type == Aliases.CONTRAT:
+        activite = df_entity[Aliases.ACTIVITE].iloc[0]
+        df_same_activity = df[df[Aliases.ACTIVITE] == activite].copy()
+        contrats_in_activity = df_same_activity[Aliases.CONTRAT].unique().tolist()
         if len(contrats_in_activity) <= 3:
             df_train_scope = df.copy()
             print("⚠️ Only 3 contrat in this activity → using all data for training.")
@@ -190,11 +193,11 @@ def handle_similarity_entity_prediction(df, all_results_established, entity_id, 
     print("✅ Model trained successfully.")
 
     # === Prepare input for target entity ===
-    sub_entity = df_entity.sort_values(["annee", "mois"]).copy()
+    sub_entity = df_entity.sort_values([Aliases.ANNEE, Aliases.MOIS]).copy()
     start_year_entity = get_move_in_year(sub_entity)
     print(f"start year: {start_year_entity}")
 
-    first_year_entity = sub_entity[sub_entity["annee"] == start_year_entity].copy()
+    first_year_entity = sub_entity[sub_entity[Aliases.ANNEE] == start_year_entity].copy()
     if first_year_entity.empty:
         print(f"⚠️ No data for start year {start_year_entity} for {entity_id}.")
         return _build_empty_result(df_entity, entity_id, level_type)
@@ -233,8 +236,8 @@ def handle_similarity_entity_prediction(df, all_results_established, entity_id, 
 
     # === Compute errors if 2023 actual exists ===
     actual_2023 = (
-        df_entity[df_entity["annee"] == 2023]
-        .sort_values("mois")["consommation"]
+        df_entity[df_entity[Aliases.ANNEE] == 2023]
+        .sort_values(Aliases.MOIS)[Aliases.CONSOMMATION_KWH]
         .fillna(0)
         .to_numpy()
     )
@@ -259,7 +262,7 @@ def handle_similarity_entity_prediction(df, all_results_established, entity_id, 
         "best_model": {
             "pred_monthly_matrix": np.array([predicted_2023]),
             "actual_monthly_matrix": np.array([actual_2023]),
-            "valid_years": df_entity["annee"].unique(),
+            "valid_years": df_entity[Aliases.ANNEE].unique(),
             "strategy": f"Predictive Start Consumption ({label})",
         },
         "test_years": {
@@ -276,14 +279,14 @@ def handle_similarity_entity_prediction(df, all_results_established, entity_id, 
     print(f"🎯 Completed predictive estimation for {entity_id}")
     return result
 
-def handle_growth_entity_prediction(df, all_results_established, entity_id, level_type="contrat", save_csv = True):
+def handle_growth_entity_prediction(df, all_results_established, entity_id, level_type=Aliases.CONTRAT, save_csv = True):
     """
     Predicts the growth rate of consumption (2023 vs 2022) for a contract or activity
     using a regression model trained on starting contracts' PF & PA features.
     Fallbacks gracefully to handle_growth_entity or empty result when needed.
     """
-    if level_type not in ["contrat", "activite"]:
-        raise ValueError("level_type must be either 'contrat' or 'activite'.")
+    if level_type not in [Aliases.CONTRAT, Aliases.ACTIVITE]:
+        raise ValueError(f"level_type must be either '{Aliases.CONTRAT}' or '{Aliases.ACTIVITE}'.")
 
     df_entity = df[df[level_type] == entity_id].copy()
     if df_entity.empty:
@@ -294,10 +297,10 @@ def handle_growth_entity_prediction(df, all_results_established, entity_id, leve
     print(f"\n🚀 Handling predictive growth {label}: {entity_id}")
 
     # === Filter by activity if possible ===
-    if level_type == "contrat":
-        activite = df_entity["activite"].iloc[0]
-        df_same_activity = df[df["activite"] == activite].copy()
-        contrats_in_activity = df_same_activity["contrat"].unique().tolist()
+    if level_type == Aliases.CONTRAT:
+        activite = df_entity[Aliases.ACTIVITE].iloc[0]
+        df_same_activity = df[df[Aliases.ACTIVITE] == activite].copy()
+        contrats_in_activity = df_same_activity[Aliases.CONTRAT].unique().tolist()
         df_train_scope = (
             df.copy() if len(contrats_in_activity) <= 3 else df_same_activity.copy()
         )
@@ -324,9 +327,9 @@ def handle_growth_entity_prediction(df, all_results_established, entity_id, leve
     model.fit(X_scaled, y)
 
     # === Prepare input for target entity ===
-    sub_entity = df_entity.sort_values(["annee", "mois"]).copy()
+    sub_entity = df_entity.sort_values([Aliases.ANNEE, Aliases.MOIS]).copy()
     start_year_entity = get_move_in_year(sub_entity)
-    first_year_entity = sub_entity[sub_entity["annee"] == start_year_entity].copy()
+    first_year_entity = sub_entity[sub_entity[Aliases.ANNEE] == start_year_entity].copy()
     if first_year_entity.empty:
         print(f"⚠️ No valid start year data for {entity_id}.")
         return _build_empty_result(df_entity, entity_id, level_type)
@@ -359,22 +362,22 @@ def handle_growth_entity_prediction(df, all_results_established, entity_id, leve
         print(f"💾 Saved training data to {entity_id}_growth_training.csv")
 
     # === Apply predicted growth rate ===
-    actual_2022_current = df_entity[df_entity["annee"] == 2022]["consommation"].sum()
+    actual_2022_current = df_entity[df_entity[Aliases.ANNEE] == 2022][Aliases.CONSOMMATION_KWH].sum()
     predicted_2023_annual = np.exp(np.log(actual_2022_current + 1e-9) + predicted_growth)
 
     # === Reuse monthly shape logic from handle_growth_entity ===
     try:
-        if level_type == "contrat":
-            df_2023 = df[df["annee"] == 2023]
-            df_2023 = df_2023[df_2023["activite"] == activite]
+        if level_type == Aliases.CONTRAT:
+            df_2023 = df[df[Aliases.ANNEE] == 2023]
+            df_2023 = df_2023[df_2023[Aliases.ACTIVITE] == activite]
         else:
-            df_2023 = df[df["annee"] == 2023]
+            df_2023 = df[df[Aliases.ANNEE] == 2023]
 
         pivot = (
             df_2023.pivot_table(
                 index=level_type,
-                columns="mois",
-                values="puissance facturée",
+                columns=Aliases.MOIS,
+                values=Aliases.PUISSANCE_FACTUREE,
                 aggfunc="sum"
             )
             .fillna(0)
@@ -386,8 +389,8 @@ def handle_growth_entity_prediction(df, all_results_established, entity_id, leve
             knn = NearestNeighbors(n_neighbors=min(3, len(Xp)), metric="euclidean")
             knn.fit(Xp)
             target_vec = (
-                df_entity[df_entity["annee"] == 2023]
-                .sort_values("mois")["puissance facturée"]
+                df_entity[df_entity[Aliases.ANNEE] == 2023]
+                .sort_values(Aliases.MOIS)[Aliases.PUISSANCE_FACTUREE]
                 .fillna(0)
                 .to_numpy()
                 .reshape(1, -1)
@@ -418,7 +421,7 @@ def handle_growth_entity_prediction(df, all_results_established, entity_id, leve
 
     # === Compute actuals and errors (same as handle_growth_entity) ===
     actual_2023 = (
-        df_entity[df_entity["annee"] == 2023]["consommation"]
+        df_entity[df_entity[Aliases.ANNEE] == 2023][Aliases.CONSOMMATION_KWH]
         .fillna(0)
         .to_numpy()
     )
@@ -441,7 +444,7 @@ def handle_growth_entity_prediction(df, all_results_established, entity_id, leve
     best_model_new = {
         "pred_monthly_matrix": np.array([predicted_2023_monthly]),
         "actual_monthly_matrix": np.array([actual_2023]),
-        "valid_years": df_entity["annee"].unique(),
+        "valid_years": df_entity[Aliases.ANNEE].unique(),
         "strategy": f"Predictive - Growth ({label})",
     }
 
@@ -468,19 +471,19 @@ def prepare_kproto_clusters(df):
     K-Prototypes clustering with categorical 'activite' and numeric monthly 'puissance facturée'.
     Works identically to the version you validated manually.
     """
-    df_2023 = df[df['annee'] == 2023].copy()
-    df_2023 = df_2023[['contrat', 'activite', 'mois', 'puissance facturée']].dropna()
-    df_2023['activite'] = df_2023['activite'].astype(str)
+    df_2023 = df[df[Aliases.ANNEE] == 2023].copy()
+    df_2023 = df_2023[[Aliases.CONTRAT, Aliases.ACTIVITE, Aliases.MOIS, Aliases.PUISSANCE_FACTUREE]].dropna()
+    df_2023[Aliases.ACTIVITE] = df_2023[Aliases.ACTIVITE].astype(str)
 
     # Pivot to get monthly columns
-    da = df_2023[['contrat', 'activite']].drop_duplicates()
-    dd = df_2023.pivot(index='contrat', columns='mois', values='puissance facturée')
-    data = dd.merge(da, on='contrat')
+    da = df_2023[[Aliases.CONTRAT, Aliases.ACTIVITE]].drop_duplicates()
+    dd = df_2023.pivot(index=Aliases.CONTRAT, columns=Aliases.MOIS, values=Aliases.PUISSANCE_FACTUREE)
+    data = dd.merge(da, on=Aliases.CONTRAT)
 
     # Make 'activite' the first column
-    data['contrat'] = data['activite']
-    data.drop(columns=['activite'], inplace=True)
-    data.rename(columns={'contrat': 'activite'}, inplace=True)
+    data[Aliases.CONTRAT] = data[Aliases.ACTIVITE]
+    data.drop(columns=[Aliases.ACTIVITE], inplace=True)
+    data.rename(columns={Aliases.CONTRAT: Aliases.ACTIVITE}, inplace=True)
 
     # Prepare matrix for K-Prototypes
     X = data.to_numpy(dtype=object)
@@ -500,14 +503,14 @@ def prepare_kproto_clusters(df):
     )
 
     print(f"✅ K-Prototypes trained successfully ({len(cluster_profiles)} clusters).")
-    return kproto, cluster_profiles, data[['activite', 'cluster']]
+    return kproto, cluster_profiles, data[[Aliases.ACTIVITE, 'cluster']]
 
 
 
-def _build_empty_result(df_entity, entity_id, level_type="contrat"):
+def _build_empty_result(df_entity, entity_id, level_type=Aliases.CONTRAT):
     """Return a consistent empty result object for similarity contracts."""
     actual_2023 = (
-        df_entity[df_entity["annee"] == 2023]["consommation"]
+        df_entity[df_entity[Aliases.ANNEE] == 2023][Aliases.CONSOMMATION_KWH]
         .fillna(0)
         .to_numpy()
     )
@@ -517,7 +520,7 @@ def _build_empty_result(df_entity, entity_id, level_type="contrat"):
     best_model = {
         'pred_monthly_matrix': None,
         'actual_monthly_matrix': None,
-        'valid_years': df_entity['annee'].unique() if not df_entity.empty else [],
+        'valid_years': df_entity[Aliases.ANNEE].unique() if not df_entity.empty else [],
         'strategy': None,
         'n_lags': None,
         'feature_block': None,
@@ -545,7 +548,7 @@ def _build_empty_result(df_entity, entity_id, level_type="contrat"):
     }
 
     return {
-        "entity": f'{ "Contrat" if level_type == "contrat" else "Activité"}_{entity_id}',
+        "entity": f'{ "Contrat" if level_type == Aliases.CONTRAT else "Activité"}_{entity_id}',
         "best_model": best_model,
         "training_end": None,
         "monthly_details": {},
@@ -554,14 +557,14 @@ def _build_empty_result(df_entity, entity_id, level_type="contrat"):
 
 
 
-def handle_growth_entity(df, all_results_established, entity_id, level_type="contrat"):
+def handle_growth_entity(df, all_results_established, entity_id, level_type=Aliases.CONTRAT):
     """
     Generic handler for growth entities (either contracts or activities).
     - For contracts: filters within same activity unless no peers exist.
     - For activities: compares directly via puissance facturée vectors.
     """
-    if level_type not in ["contrat", "activite"]:
-        raise ValueError("level_type must be either 'contrat' or 'activite'.")
+    if level_type not in [Aliases.CONTRAT, Aliases.ACTIVITE]:
+        raise ValueError(f"level_type must be either '{Aliases.CONTRAT}' or '{Aliases.ACTIVITE}'.")
 
     df_entity = df[df[level_type] == entity_id].copy()
     if df_entity.empty:
@@ -572,25 +575,25 @@ def handle_growth_entity(df, all_results_established, entity_id, level_type="con
     print(f"\n🚀 Handling growth {label}: {entity_id}")
 
     # === Determine comparison subset ===
-    if level_type == "contrat":
-        activite = df_entity["activite"].iloc[0]
-        df_same_activity = df[df["activite"] == activite].copy()
+    if level_type == Aliases.CONTRAT:
+        activite = df_entity[Aliases.ACTIVITE].iloc[0]
+        df_same_activity = df[df[Aliases.ACTIVITE] == activite].copy()
 
-        contrats_in_activity = df_same_activity["contrat"].unique().tolist()
+        contrats_in_activity = df_same_activity[Aliases.CONTRAT].unique().tolist()
         if len(contrats_in_activity) <= 1:
             # No other contracts in same activity → use all data
-            df_2023 = df[df["annee"] == 2023].copy()
+            df_2023 = df[df[Aliases.ANNEE] == 2023].copy()
         else:
-            df_2023 = df_same_activity[df_same_activity["annee"] == 2023].copy()
+            df_2023 = df_same_activity[df_same_activity[Aliases.ANNEE] == 2023].copy()
     else:
-        df_2023 = df[df["annee"] == 2023].copy()
+        df_2023 = df[df[Aliases.ANNEE] == 2023].copy()
 
     # === Build pivot for similarity ===
     pivot = (
         df_2023.pivot_table(
             index=level_type,
-            columns="mois",
-            values="puissance facturée",
+            columns=Aliases.MOIS,
+            values=Aliases.PUISSANCE_FACTUREE,
             aggfunc="sum"
         )
         .fillna(0)
@@ -602,8 +605,8 @@ def handle_growth_entity(df, all_results_established, entity_id, level_type="con
         return _build_empty_result(df_entity, entity_id, level_type)
 
     target_vec = (
-        df_entity[df_entity["annee"] == 2023]
-        .sort_values("mois")["puissance facturée"]
+        df_entity[df_entity[Aliases.ANNEE] == 2023]
+        .sort_values(Aliases.MOIS)[Aliases.PUISSANCE_FACTUREE]
         .fillna(0)
         .to_numpy()
         .reshape(1, -1)
@@ -636,7 +639,7 @@ def handle_growth_entity(df, all_results_established, entity_id, level_type="con
     print(f"✅ Using top {top_k} similar {level_type}s: {top_similar_ids} with weights {weights}")
 
     # === Find corresponding established results ===
-    prefix = "Contrat" if level_type == "contrat" else "Activité"
+    prefix = "Contrat" if level_type == Aliases.CONTRAT else "Activité"
     
     valid_matches = []
     valid_weights = []
@@ -684,7 +687,7 @@ def handle_growth_entity(df, all_results_established, entity_id, level_type="con
     
     print(f"📈 Weighted growth rate (log): {weighted_growth_rate:.4f}")
 
-    actual_2022_current = df_entity[df_entity["annee"] == 2022]["consommation"].sum()
+    actual_2022_current = df_entity[df_entity[Aliases.ANNEE] == 2022][Aliases.CONSOMMATION_KWH].sum()
     predicted_2023_annual = np.exp(np.log(actual_2022_current + 1e-9) + weighted_growth_rate)
 
     # === Compute weighted mean curve ===
@@ -701,7 +704,7 @@ def handle_growth_entity(df, all_results_established, entity_id, level_type="con
 
     # === Compute actuals and errors ===
     actual_2023 = (
-        df_entity[df_entity["annee"] == 2023]["consommation"]
+        df_entity[df_entity[Aliases.ANNEE] == 2023][Aliases.CONSOMMATION_KWH]
         .fillna(0)
         .to_numpy()
     )
@@ -725,7 +728,7 @@ def handle_growth_entity(df, all_results_established, entity_id, level_type="con
     best_model_new = {
         "pred_monthly_matrix": np.array([predicted_2023_monthly]),
         "actual_monthly_matrix": np.array([actual_2023]),
-        "valid_years": df_entity["annee"].unique(),
+        "valid_years": df_entity[Aliases.ANNEE].unique(),
         "strategy": f"Clustering - Growth ({label})",
     }
 
@@ -746,14 +749,14 @@ def handle_growth_entity(df, all_results_established, entity_id, level_type="con
     print(f"✅ Predicted 2023 annual: {predicted_2023_annual:,.2f}")
     return result
 
-def handle_similarity_entity(df, all_results_established, entity_id, level_type="contrat", k = 3):
+def handle_similarity_entity(df, all_results_established, entity_id, level_type=Aliases.CONTRAT, k = 3):
     """
     Generic handler for similarity entities (2023 starters).
     - For contracts: filter within same activity (fallback to all if alone).
     - For activities: similarity based on puissance facturée vectors.
     """
-    if level_type not in ["contrat", "activite"]:
-        raise ValueError("level_type must be either 'contrat' or 'activite'.")
+    if level_type not in [Aliases.CONTRAT, Aliases.ACTIVITE]:
+        raise ValueError(f"level_type must be either '{Aliases.CONTRAT}' or '{Aliases.ACTIVITE}'.")
 
     df_entity = df[df[level_type] == entity_id].copy()
     if df_entity.empty:
@@ -764,22 +767,22 @@ def handle_similarity_entity(df, all_results_established, entity_id, level_type=
     print(f"\n🔗 Handling similarity {label}: {entity_id}")
 
     # === Determine comparison scope ===
-    if level_type == "contrat":
-        activite = df_entity["activite"].iloc[0]
-        df_same_activity = df[df["activite"] == activite].copy()
-        contrats_in_activity = df_same_activity["contrat"].unique().tolist()
+    if level_type == Aliases.CONTRAT:
+        activite = df_entity[Aliases.ACTIVITE].iloc[0]
+        df_same_activity = df[df[Aliases.ACTIVITE] == activite].copy()
+        contrats_in_activity = df_same_activity[Aliases.CONTRAT].unique().tolist()
         if len(contrats_in_activity) <= 1:
-            df_2023 = df[df["annee"] == 2023].copy()
+            df_2023 = df[df[Aliases.ANNEE] == 2023].copy()
         else:
-            df_2023 = df_same_activity[df_same_activity["annee"] == 2023].copy()
+            df_2023 = df_same_activity[df_same_activity[Aliases.ANNEE] == 2023].copy()
     else:
-        df_2023 = df[df["annee"] == 2023].copy()
+        df_2023 = df[df[Aliases.ANNEE] == 2023].copy()
 
     pivot = (
         df_2023.pivot_table(
             index=level_type,
-            columns="mois",
-            values="puissance facturée",
+            columns=Aliases.MOIS,
+            values=Aliases.PUISSANCE_FACTUREE,
             aggfunc="sum"
         )
         .fillna(0)
@@ -791,8 +794,8 @@ def handle_similarity_entity(df, all_results_established, entity_id, level_type=
         return _build_empty_result(df_entity, entity_id, level_type)
 
     target_vec = (
-        df_entity[df_entity["annee"] == 2023]
-        .sort_values("mois")["puissance facturée"]
+        df_entity[df_entity[Aliases.ANNEE] == 2023]
+        .sort_values(Aliases.MOIS)[Aliases.PUISSANCE_FACTUREE]
         .fillna(0)
         .to_numpy()
         .reshape(1, -1)
@@ -823,7 +826,7 @@ def handle_similarity_entity(df, all_results_established, entity_id, level_type=
     
     print(f"✅ Using top {top_k} similar {label}s: {top_similar_ids} with weights {weights}")
 
-    prefix = "Contrat" if level_type == "contrat" else "Activité"
+    prefix = "Contrat" if level_type == Aliases.CONTRAT else "Activité"
     
     valid_matches = []
     valid_weights = []
@@ -864,8 +867,8 @@ def handle_similarity_entity(df, all_results_established, entity_id, level_type=
         print(f"  {match_id}: weight={weight:.2f}")
 
     actual_2023 = (
-        df_entity[df_entity["annee"] == 2023]
-        .sort_values("mois")["consommation"]
+        df_entity[df_entity[Aliases.ANNEE] == 2023]
+        .sort_values(Aliases.MOIS)[Aliases.CONSOMMATION_KWH]
         .fillna(0)
         .to_numpy()
     )
@@ -890,7 +893,7 @@ def handle_similarity_entity(df, all_results_established, entity_id, level_type=
         "best_model": {
             "pred_monthly_matrix": np.array([predicted_2023]),
             "actual_monthly_matrix": np.array([actual_2023]),
-            "valid_years": df_entity["annee"].unique(),
+            "valid_years": df_entity[Aliases.ANNEE].unique(),
             "strategy": f"Clustering - Similarity ({label})",
         },
         "test_years": {
@@ -909,11 +912,11 @@ def handle_similarity_entity(df, all_results_established, entity_id, level_type=
 
 
 
-def filter_established_entities(all_results, growth_entities, similarity_entities, level_type="contrat"):
-    if level_type not in ["contrat", "activite"]:
-        raise ValueError("level_type must be either 'contrat' or 'activite'.")
+def filter_established_entities(all_results, growth_entities, similarity_entities, level_type=Aliases.CONTRAT):
+    if level_type not in [Aliases.CONTRAT, Aliases.ACTIVITE]:
+        raise ValueError(f"level_type must be either '{Aliases.CONTRAT}' or '{Aliases.ACTIVITE}'.")
 
-    prefix = "Contrat" if level_type == "contrat" else "Activité"
+    prefix = "Contrat" if level_type == Aliases.CONTRAT else "Activité"
 
     # --- Variable part: construct exclusion set ---
     excluded_entities = {

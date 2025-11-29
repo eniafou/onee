@@ -15,6 +15,7 @@ import numpy as np
 import pandas as pd
 from onee.config.stf_config import ShortTermForecastConfig
 from onee.data.loader import DataLoader
+from onee.data.names import Aliases
 
 # ============================================================================
 # LOAD CONFIGURATION
@@ -59,7 +60,7 @@ if 1 in RUN_LEVELS:
     print(f"LEVEL 1: CONTRAT")
     print(f"{'#'*60}")
 
-    contrats = sorted(df_contrats['contrat'].unique())
+    contrats = sorted(df_contrats[Aliases.CONTRAT].unique())
 
     established_contracts = []
     growth_contracts = []
@@ -67,7 +68,7 @@ if 1 in RUN_LEVELS:
 
     # --- Categorize contracts ---
     for contrat in contrats:
-        df_contrat = df_contrats[df_contrats['contrat'] == contrat].copy()
+        df_contrat = df_contrats[df_contrats[Aliases.CONTRAT] == contrat].copy()
         move_in_year = get_move_in_year(df_contrat)
 
         if move_in_year is None or move_in_year <= 2021:
@@ -84,7 +85,7 @@ if 1 in RUN_LEVELS:
     # --- Process established contracts (normal forecasting) ---
     all_results_established = []
     for i, contrat in enumerate(established_contracts):
-        df_contrat = df_contrats[df_contrats['contrat'] == contrat].copy()
+        df_contrat = df_contrats[df_contrats[Aliases.CONTRAT] == contrat].copy()
         result = run_analysis_for_entity(
             df_contrat,
             f"Contrat_{contrat}",
@@ -116,13 +117,13 @@ if 2 in RUN_LEVELS:
     print(f"LEVEL 2: PARTENAIRE")
     print(f"{'#'*60}")
 
-    partenaires = sorted(df_contrats['partenaire'].unique())
+    partenaires = sorted(df_contrats[Aliases.PARTENAIRE].unique())
 
     for i, partenaire in enumerate(partenaires):
-        df_partenaire = df_contrats[df_contrats['partenaire'] == partenaire].copy()
-        df_partenaire = df_partenaire.groupby(['annee', 'mois']).agg({
+        df_partenaire = df_contrats[df_contrats[Aliases.PARTENAIRE] == partenaire].copy()
+        df_partenaire = df_partenaire.groupby([Aliases.ANNEE, Aliases.MOIS]).agg({
             VARIABLE: 'sum',
-            'puissance facturée': 'sum'
+            Aliases.PUISSANCE_FACTUREE: 'sum'
         }).reset_index()
 
         result = run_analysis_for_entity(
@@ -141,7 +142,7 @@ if 3 in RUN_LEVELS:
     print(f"LEVEL 3: ACTIVITE")
     print(f"{'#'*60}")
 
-    activites = sorted(df_contrats['activite'].unique())
+    activites = sorted(df_contrats[Aliases.ACTIVITE].unique())
 
     established_activites = []
     growth_activites = []
@@ -149,7 +150,7 @@ if 3 in RUN_LEVELS:
 
     # --- Categorize activities ---
     for activite in activites:
-        df_activite = df_contrats[df_contrats['activite'] == activite].copy()
+        df_activite = df_contrats[df_contrats[Aliases.ACTIVITE] == activite].copy()
         move_in_year = get_move_in_year(df_activite)
 
         if move_in_year is None or move_in_year <= 2021:
@@ -166,10 +167,10 @@ if 3 in RUN_LEVELS:
     # --- Process established activities ---
     all_results_established_activite = []
     for activite in established_activites:
-        df_activite = df_contrats[df_contrats['activite'] == activite].copy()
-        df_activite = df_activite.groupby(['annee', 'mois']).agg({
+        df_activite = df_contrats[df_contrats[Aliases.ACTIVITE] == activite].copy()
+        df_activite = df_activite.groupby([Aliases.ANNEE, Aliases.MOIS]).agg({
             VARIABLE: 'sum',
-            'puissance facturée': 'sum'
+            Aliases.PUISSANCE_FACTUREE: 'sum'
         }).reset_index()
 
         result = run_analysis_for_entity(

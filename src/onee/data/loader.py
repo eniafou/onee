@@ -14,6 +14,10 @@ import numpy as np
 import pandas as pd
 
 from onee.utils import clean_name, require_columns
+from onee.data.names import (
+    Tables, GRDColumns, ExogenousColumns, CDColumns, ActiveContratsColumns,
+    Aliases, GRDValues, build_variable_specs
+)
 
 
 class DataLoader:
@@ -28,22 +32,8 @@ class DataLoader:
     """
     
     # Variable specifications for different target variables
-    VARIABLE_SPECS = {
-        "nbr_clients": {
-            "regional_select_expr": '"Nbr Clients" as nbr_clients',
-            "regional_var_col": "nbr_clients",
-            "distributor_supported": False,
-            "distributor_select_expr": None,
-            "distributor_var_col": None,
-        },
-        "consommation_kwh": {
-            "regional_select_expr": 'Consommation_Kwh as consommation_kwh',
-            "regional_var_col": "consommation_kwh",
-            "distributor_supported": True,
-            "distributor_select_expr": 'SUM(Consommation_Kwh) as consommation_kwh',
-            "distributor_var_col": "consommation_kwh",
-        },
-    }
+    # Now loaded dynamically from names.py
+    VARIABLE_SPECS = build_variable_specs()
     
     def __init__(self, project_root: Path):
         """
@@ -80,50 +70,50 @@ class DataLoader:
         
         query_regional_mt = f"""
             SELECT
-                Year  as annee,
-                Month as mois,
-                Activity as activite,
+                {GRDColumns.YEAR} as {Aliases.ANNEE},
+                {GRDColumns.MONTH} as {Aliases.MOIS},
+                {GRDColumns.ACTIVITY} as {Aliases.ACTIVITE},
                 {spec['regional_select_expr']}
-            FROM GRD
-            WHERE GRD = 'SRM' AND Class = 'MT' AND Region = '{target_region}'
-            ORDER BY Year, Month, Activity
+            FROM {Tables.GRD}
+            WHERE {GRDColumns.GRD} = '{GRDValues.GRD_SRM}' AND {GRDColumns.CLASS} = '{GRDValues.CLASS_MT}' AND {GRDColumns.REGION} = '{target_region}'
+            ORDER BY {GRDColumns.YEAR}, {GRDColumns.MONTH}, {GRDColumns.ACTIVITY}
         """
         
         query_regional_bt = f"""
             SELECT
-                Year  as annee,
-                Month as mois,
-                Activity as activite,
+                {GRDColumns.YEAR} as {Aliases.ANNEE},
+                {GRDColumns.MONTH} as {Aliases.MOIS},
+                {GRDColumns.ACTIVITY} as {Aliases.ACTIVITE},
                 {spec['regional_select_expr']}
-            FROM GRD
-            WHERE GRD = 'SRM' AND Class = 'BT' AND Region = '{target_region}'
-            ORDER BY Year, Month, Activity
+            FROM {Tables.GRD}
+            WHERE {GRDColumns.GRD} = '{GRDValues.GRD_SRM}' AND {GRDColumns.CLASS} = '{GRDValues.CLASS_BT}' AND {GRDColumns.REGION} = '{target_region}'
+            ORDER BY {GRDColumns.YEAR}, {GRDColumns.MONTH}, {GRDColumns.ACTIVITY}
         """
         
         query_dist = None
         if spec["distributor_supported"]:
             query_dist = f"""
                 SELECT
-                    Year as annee,
-                    Month as mois,
-                    GRD as distributeur,
+                    {GRDColumns.YEAR} as {Aliases.ANNEE},
+                    {GRDColumns.MONTH} as {Aliases.MOIS},
+                    {GRDColumns.GRD} as {Aliases.DISTRIBUTEUR},
                     {spec['distributor_select_expr']}
-                FROM GRD
-                WHERE GRD != 'SRM' AND Region = '{target_region}'
-                GROUP BY Year, Month, GRD
-                ORDER BY Year, Month, GRD
+                FROM {Tables.GRD}
+                WHERE {GRDColumns.GRD} != '{GRDValues.GRD_SRM}' AND {GRDColumns.REGION} = '{target_region}'
+                GROUP BY {GRDColumns.YEAR}, {GRDColumns.MONTH}, {GRDColumns.GRD}
+                ORDER BY {GRDColumns.YEAR}, {GRDColumns.MONTH}, {GRDColumns.GRD}
             """
         
         query_features = f"""
             SELECT
-                Year as annee,
-                AVG(PIB_MDH) as pib_mdh,
-                AVG(Primaire)    as gdp_primaire,
-                AVG(Secondaire)  as gdp_secondaire,
-                AVG(Tertiaire)   as gdp_tertiaire
-            FROM Exogenous_Data
-            WHERE Region = '{target_region}'
-            GROUP BY Year
+                {ExogenousColumns.YEAR} as {Aliases.ANNEE},
+                AVG({ExogenousColumns.PIB_MDH}) as {Aliases.PIB_MDH},
+                AVG({ExogenousColumns.PRIMAIRE}) as {Aliases.GDP_PRIMAIRE},
+                AVG({ExogenousColumns.SECONDAIRE}) as {Aliases.GDP_SECONDAIRE},
+                AVG({ExogenousColumns.TERTIAIRE}) as {Aliases.GDP_TERTIAIRE}
+            FROM {Tables.EXOGENOUS_DATA}
+            WHERE {ExogenousColumns.REGION} = '{target_region}'
+            GROUP BY {ExogenousColumns.YEAR}
         """
         
         var_cols = {
@@ -169,17 +159,19 @@ class DataLoader:
         db.close()
         
         # Combine MT and BT data
-        df_regional_mt['activite'] = df_regional_mt['activite'].replace("Administratif", "Administratif_mt")
+        df_regional_mt[Aliases.ACTIVITE] = df_regional_mt[Aliases.ACTIVITE].replace(
+            GRDValues.ACTIVITY_ADMINISTRATIF, GRDValues.ACTIVITY_ADMINISTRATIF_MT
+        )
         df_regional = pd.concat([df_regional_bt, df_regional_mt])
         
         # Validate and clean
         reg_var_col = var_cols["regional"]
-        require_columns(df_regional, ["annee", "mois", "activite", reg_var_col], "df_regional")
+        require_columns(df_regional, [Aliases.ANNEE, Aliases.MOIS, Aliases.ACTIVITE, reg_var_col], "df_regional")
         df_regional[reg_var_col] = df_regional[reg_var_col].fillna(0)
         
         if df_dist is not None:
             dist_var_col = var_cols["distributor"]
-            require_columns(df_dist, ["annee", "mois", "distributeur", dist_var_col], "df_dist")
+            require_columns(df_dist, [Aliases.ANNEE, Aliases.MOIS, Aliases.DISTRIBUTEUR, dist_var_col], "df_dist")
             df_dist[dist_var_col] = df_dist[dist_var_col].fillna(0)
         
         return df_regional, df_features, df_dist, var_cols
@@ -208,47 +200,47 @@ class DataLoader:
         db = self._connect_db(db_path)
         
         # Load features from regional database
-        query_features = """
-        SELECT Year as annee, 
-               SUM(PIB_MDH) as pib_mdh,
-               SUM(Primaire) as gdp_primaire,
-               SUM(Secondaire) as gdp_secondaire,
-               SUM(Tertiaire) as gdp_tertiaire
-        FROM Exogenous_Data
-        GROUP BY Year
+        query_features = f"""
+        SELECT {ExogenousColumns.YEAR} as {Aliases.ANNEE}, 
+               SUM({ExogenousColumns.PIB_MDH}) as {Aliases.PIB_MDH},
+               SUM({ExogenousColumns.PRIMAIRE}) as {Aliases.GDP_PRIMAIRE},
+               SUM({ExogenousColumns.SECONDAIRE}) as {Aliases.GDP_SECONDAIRE},
+               SUM({ExogenousColumns.TERTIAIRE}) as {Aliases.GDP_TERTIAIRE}
+        FROM {Tables.EXOGENOUS_DATA}
+        GROUP BY {ExogenousColumns.YEAR}
         """
         df_features = pd.read_sql_query(query_features, db)
         
         # Load contracts data
-        query_contrats = """
+        query_contrats = f"""
         SELECT 
-        Partenaire as partenaire, 
-        Numero_de_contrat as contrat, 
-        year as annee, 
-        month as mois, 
-        Activite as activite, 
-        Consommation_Kwh as consommation_kwh,
-        Puissance_facturee as 'puissance facturée',
-        Puissance_appelee as 'puissance appelée',
-        Date_emmenagement as 'Date d''emménagement',
-        Date_demenagement as 'Date de déménagement'
-        FROM CD
+        {CDColumns.PARTENAIRE} as {Aliases.PARTENAIRE}, 
+        {CDColumns.NUMERO_DE_CONTRAT} as {Aliases.CONTRAT}, 
+        {CDColumns.YEAR} as {Aliases.ANNEE}, 
+        {CDColumns.MONTH} as {Aliases.MOIS}, 
+        {CDColumns.ACTIVITE} as {Aliases.ACTIVITE}, 
+        {CDColumns.CONSOMMATION_KWH} as {Aliases.CONSOMMATION_KWH},
+        {CDColumns.PUISSANCE_FACTUREE} as '{Aliases.PUISSANCE_FACTUREE}',
+        {CDColumns.PUISSANCE_APPELEE} as '{Aliases.PUISSANCE_APPELEE}',
+        {CDColumns.DATE_EMMENAGEMENT} as '{Aliases.DATE_EMMENAGEMENT}',
+        {CDColumns.DATE_DEMENAGEMENT} as '{Aliases.DATE_DEMENAGEMENT}'
+        FROM {Tables.CD}
         """
         df_contrats = pd.read_sql_query(query_contrats, db)
         
         # Optionally load activity features
         df_activite_features = None
         if include_activite_features:
-            query_activite_features = """
+            query_activite_features = f"""
             SELECT 
-            annee as annee, 
-            activite as activite,
-            total_active_contrats as total_active_contrats,
-            just_started as just_started,
-            two_years_old as two_years_old,
-            three_years_old as three_years_old,
-            more_than_3_years_old as more_than_3_years_old
-            from Active_Contrats_Features
+            {ActiveContratsColumns.ANNEE} as {Aliases.ANNEE}, 
+            {ActiveContratsColumns.ACTIVITE} as {Aliases.ACTIVITE},
+            {ActiveContratsColumns.TOTAL_ACTIVE_CONTRATS} as {Aliases.TOTAL_ACTIVE_CONTRATS},
+            {ActiveContratsColumns.JUST_STARTED} as {Aliases.JUST_STARTED},
+            {ActiveContratsColumns.TWO_YEARS_OLD} as {Aliases.TWO_YEARS_OLD},
+            {ActiveContratsColumns.THREE_YEARS_OLD} as {Aliases.THREE_YEARS_OLD},
+            {ActiveContratsColumns.MORE_THAN_3_YEARS_OLD} as {Aliases.MORE_THAN_3_YEARS_OLD}
+            FROM {Tables.ACTIVE_CONTRATS_FEATURES}
             """
             df_activite_features = pd.read_sql_query(query_activite_features, db)
         
@@ -271,7 +263,7 @@ class DataLoader:
         Returns:
             Dictionary mapping entity name -> {year: monthly_predictions}
         """
-        variable: str = "nbr_clients"
+        variable: str = Aliases.NBR_CLIENTS
         results_path = self.project_root / f"{variable}/all_results_{clean_name(region_name)}_{variable}.pkl"
         
         if not results_path.exists():

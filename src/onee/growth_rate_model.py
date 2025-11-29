@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 from typing import Dict, Tuple, Optional, Iterable, List, Mapping, Union
 import inspect
 from onee.utils import add_annual_client_feature, add_yearly_feature
+from onee.data.names import Aliases
 from abc import ABC, abstractmethod
 from sklearn.linear_model import LinearRegression
 from scipy.interpolate import lagrange, CubicSpline
@@ -46,15 +47,15 @@ def build_growth_rate_features(
 
     df = df_features.copy()
 
-    if "annee" not in df.columns:
-        raise ValueError("df_features must contain an 'annee' column.")
+    if Aliases.ANNEE not in df.columns:
+        raise ValueError(f"df_features must contain an '{Aliases.ANNEE}' column.")
 
-    cols = ["annee"] + feature_cols if feature_cols else ["annee"]
+    cols = [Aliases.ANNEE] + feature_cols if feature_cols else [Aliases.ANNEE]
     df = (
         df[cols]
-        .drop_duplicates(subset=["annee"])
-        .sort_values("annee")
-        .set_index("annee")
+        .drop_duplicates(subset=[Aliases.ANNEE])
+        .sort_values(Aliases.ANNEE)
+        .set_index(Aliases.ANNEE)
     )
 
     if feature_cols:
@@ -147,7 +148,7 @@ def build_growth_rate_features(
     
     if use_pf:
         feature_array = add_yearly_feature(
-            feature_array, years_list, df_monthly, feature="puissance facturée", agg_method="sum"
+            feature_array, years_list, df_monthly, feature=Aliases.PUISSANCE_FACTUREE, agg_method="sum"
         )
 
     return feature_array if feature_array.size else None
@@ -611,7 +612,7 @@ class IntensityForecastWrapper(BaseForecastModel):
 
 
     def __init__(self, 
-                 normalization_col: str = "total_active_contrats", 
+                 normalization_col: str = Aliases.TOTAL_ACTIVE_CONTRATS, 
                  internal_model: BaseForecastModel = None,
                  internal_model_type: str = "GaussianProcessForecastModel",
                  # GP parameters
@@ -706,7 +707,7 @@ class IntensityForecastWrapper(BaseForecastModel):
         
         for yr in future_years:
             # Safe lookup for the specific year
-            val = df_features.loc[df_features['annee'] == yr, self.norm_col].values
+            val = df_features.loc[df_features[Aliases.ANNEE] == yr, self.norm_col].values
             if len(val) == 0:
                 raise ValueError(f"Missing '{self.norm_col}' data for future year {yr}")
             future_factors.append(val[0])
@@ -764,7 +765,7 @@ class IntensityForecastWrapper(BaseForecastModel):
         save_plot: bool = False,
         save_folder: str = ".",
         df_monthly: Optional[pd.DataFrame] = None,
-        target_col: str = "consommation_kwh"
+        target_col: str = Aliases.CONSOMMATION_KWH
     ):
         """
         Visualizes the TOTAL Consumption Forecast.
@@ -814,8 +815,8 @@ class IntensityForecastWrapper(BaseForecastModel):
         # 5. Plot Actuals
         ground_truth_map = {}
         if df_monthly is not None:
-             if target_col in df_monthly.columns and "annee" in df_monthly.columns:
-                ground_truth_map = df_monthly.groupby("annee")[target_col].sum().to_dict()
+             if target_col in df_monthly.columns and Aliases.ANNEE in df_monthly.columns:
+                ground_truth_map = df_monthly.groupby(Aliases.ANNEE)[target_col].sum().to_dict()
 
         if ground_truth_map:
             act_years = []
@@ -1121,7 +1122,7 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
         save_plot: bool = False,
         save_folder: str = ".",
         df_monthly: Optional[pd.DataFrame] = None,
-        target_col: str = "consommation_kwh"
+        target_col: str = Aliases.CONSOMMATION_KWH
     ):
         """
         Visualizes the forecast, confidence intervals, actuals, AND the underlying Growth Trend.
@@ -1160,8 +1161,8 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
         # 4. Plot Actuals
         ground_truth_map = {}
         if df_monthly is not None:
-            if target_col in df_monthly.columns and "annee" in df_monthly.columns:
-                annual_agg = df_monthly.groupby("annee")[target_col].sum()
+            if target_col in df_monthly.columns and Aliases.ANNEE in df_monthly.columns:
+                annual_agg = df_monthly.groupby(Aliases.ANNEE)[target_col].sum()
                 ground_truth_map = annual_agg.to_dict()
 
         if ground_truth_map:

@@ -9,6 +9,7 @@ from long_term_forecast_strategies import run_long_horizon_forecast
 from onee.utils import fill_2020_with_avg, clean_name
 from onee.config.ltf_config import LongTermForecastConfig
 from onee.data.loader import DataLoader
+from onee.data.names import Aliases, GRDValues
 
 import numpy as np
 import pandas as pd
@@ -67,13 +68,13 @@ if __name__ == "__main__":
         )
         all_results = []
 
-        activities = sorted(df_regional["activite"].unique())
+        activities = sorted(df_regional[Aliases.ACTIVITE].unique())
         mt_activities = [
-            "Administratif_mt",
-            "Agricole",
-            "Industriel",
-            "Résidentiel",
-            "Tertiaire",
+            GRDValues.ACTIVITY_ADMINISTRATIF_MT,
+            GRDValues.ACTIVITY_AGRICOLE,
+            GRDValues.ACTIVITY_INDUSTRIEL,
+            GRDValues.ACTIVITY_RESIDENTIEL,
+            GRDValues.ACTIVITY_TERTIAIRE,
         ]
         bt_activities = [a for a in activities if a not in mt_activities]
 
@@ -91,8 +92,8 @@ if __name__ == "__main__":
                     entity_name = f"Activity_{activity}"
                     print(f"\n{'#'*30}\n{entity_name}\n{'#'*30}")
                     df_activity = (
-                        df_regional[df_regional["activite"] == activity][
-                            ["annee", "mois", reg_var_col]
+                        df_regional[df_regional[Aliases.ACTIVITE] == activity][
+                            [Aliases.ANNEE, Aliases.MOIS, reg_var_col]
                         ]
                         .copy()
                         .rename(columns={reg_var_col: config.data.target_variable})
@@ -101,12 +102,12 @@ if __name__ == "__main__":
                         df_activity = fill_2020_with_avg(df_activity, reg_var_col)
 
                     df_train = df_activity[
-                        (df_activity["annee"] >= train_start) & (df_activity["annee"] <= train_end)
+                        (df_activity[Aliases.ANNEE] >= train_start) & (df_activity[Aliases.ANNEE] <= train_end)
                     ]
                     monthly_matrix = create_monthly_matrix(
                         df_train, value_col=config.data.target_variable
                     )
-                    years = np.sort(df_train["annee"].unique())
+                    years = np.sort(df_train[Aliases.ANNEE].unique())
 
                     res = run_long_horizon_forecast(
                         monthly_matrix=monthly_matrix,
@@ -127,7 +128,7 @@ if __name__ == "__main__":
                     for y, v in zip(forecast_years, pred_annual):
                         actual = None
                         percent_error = None
-                        mask = df_activity["annee"] == y
+                        mask = df_activity[Aliases.ANNEE] == y
                         if not df_activity.loc[mask, reg_var_col].empty:
                             actual = df_activity.loc[mask, reg_var_col].sum()
                             percent_error = (
@@ -157,10 +158,10 @@ if __name__ == "__main__":
             # ────────────────────────────────────────────────────────────────
             if 2 in RUN_LEVELS:
                 print(f"\n{'#'*60}\nLEVEL 2: AGGREGATED BT\n{'#'*60}")
-                df_bt = df_regional[df_regional["activite"].isin(bt_activities)]
+                df_bt = df_regional[df_regional[Aliases.ACTIVITE].isin(bt_activities)]
                 if not df_bt.empty:
                     df_bt_agg = (
-                        df_bt.groupby(["annee", "mois"])
+                        df_bt.groupby([Aliases.ANNEE, Aliases.MOIS])
                         .agg({reg_var_col: "sum"})
                         .reset_index()
                         .rename(columns={reg_var_col: config.data.target_variable})
@@ -174,12 +175,12 @@ if __name__ == "__main__":
                     )
 
                     df_train = df_bt_agg[
-                        (df_bt_agg["annee"] >= train_start) & (df_bt_agg["annee"] <= train_end)
+                        (df_bt_agg[Aliases.ANNEE] >= train_start) & (df_bt_agg[Aliases.ANNEE] <= train_end)
                     ]
                     monthly_matrix = create_monthly_matrix(
                         df_train, value_col=config.data.target_variable
                     )
-                    years = np.sort(df_train["annee"].unique())
+                    years = np.sort(df_train[Aliases.ANNEE].unique())
 
                     res = run_long_horizon_forecast(
                         monthly_matrix=monthly_matrix,
@@ -200,7 +201,7 @@ if __name__ == "__main__":
                     for y, v in zip(forecast_years, pred_annual):
                         actual = None
                         percent_error = None
-                        mask = df_bt_agg["annee"] == y
+                        mask = df_bt_agg[Aliases.ANNEE] == y
                         if not df_bt_agg.loc[mask, config.data.target_variable].empty:
                             actual = df_bt_agg.loc[mask, config.data.target_variable].sum()
                             percent_error = (
@@ -230,10 +231,10 @@ if __name__ == "__main__":
             # ────────────────────────────────────────────────────────────────
             if 3 in RUN_LEVELS:
                 print(f"\n{'#'*60}\nLEVEL 3: AGGREGATED MT\n{'#'*60}")
-                df_mt = df_regional[df_regional["activite"].isin(mt_activities)]
+                df_mt = df_regional[df_regional[Aliases.ACTIVITE].isin(mt_activities)]
                 if not df_mt.empty:
                     df_mt_agg = (
-                        df_mt.groupby(["annee", "mois"])
+                        df_mt.groupby([Aliases.ANNEE, Aliases.MOIS])
                         .agg({reg_var_col: "sum"})
                         .reset_index()
                         .rename(columns={reg_var_col: config.data.target_variable})
@@ -246,12 +247,12 @@ if __name__ == "__main__":
                     )
 
                     df_train = df_mt_agg[
-                        (df_mt_agg["annee"] >= train_start) & (df_mt_agg["annee"] <= train_end)
+                        (df_mt_agg[Aliases.ANNEE] >= train_start) & (df_mt_agg[Aliases.ANNEE] <= train_end)
                     ]
                     monthly_matrix = create_monthly_matrix(
                         df_train, value_col=config.data.target_variable
                     )
-                    years = np.sort(df_train["annee"].unique())
+                    years = np.sort(df_train[Aliases.ANNEE].unique())
 
                     res = run_long_horizon_forecast(
                         monthly_matrix=monthly_matrix,
@@ -272,7 +273,7 @@ if __name__ == "__main__":
                     for y, v in zip(forecast_years, pred_annual):
                         actual = None
                         percent_error = None
-                        mask = df_mt_agg["annee"] == y
+                        mask = df_mt_agg[Aliases.ANNEE] == y
                         if not df_mt_agg.loc[mask, config.data.target_variable].empty:
                             actual = df_mt_agg.loc[mask, config.data.target_variable].sum()
                             percent_error = (
@@ -303,7 +304,7 @@ if __name__ == "__main__":
             if 4 in RUN_LEVELS:
                 print(f"\n{'#'*60}\nLEVEL 4: TOTAL REGIONAL\n{'#'*60}")
                 df_total_regional = (
-                    df_regional.groupby(["annee", "mois"])
+                    df_regional.groupby([Aliases.ANNEE, Aliases.MOIS])
                     .agg({reg_var_col: "sum"})
                     .reset_index()
                     .rename(columns={reg_var_col: config.data.target_variable})
@@ -317,12 +318,12 @@ if __name__ == "__main__":
                 )
 
                 df_train = df_total_regional[
-                    (df_total_regional["annee"] >= train_start) & (df_total_regional["annee"] <= train_end)
+                    (df_total_regional[Aliases.ANNEE] >= train_start) & (df_total_regional[Aliases.ANNEE] <= train_end)
                 ]
                 monthly_matrix = create_monthly_matrix(
                     df_train, value_col=config.data.target_variable
                 )
-                years = np.sort(df_train["annee"].unique())
+                years = np.sort(df_train[Aliases.ANNEE].unique())
 
                 res = run_long_horizon_forecast(
                     monthly_matrix=monthly_matrix,
@@ -346,7 +347,7 @@ if __name__ == "__main__":
                 for y, v in zip(forecast_years, pred_annual):
                     actual = None
                     percent_error = None
-                    mask = df_total_regional["annee"] == y
+                    mask = df_total_regional[Aliases.ANNEE] == y
                     if not df_total_regional.loc[mask, reg_var_col].empty:
                         actual = df_total_regional.loc[mask, reg_var_col].sum()
                         percent_error = (
@@ -377,10 +378,10 @@ if __name__ == "__main__":
                 # Level 5: Individual Distributors
                 if 5 in RUN_LEVELS:
                     print(f"\n{'#'*60}\nLEVEL 5: INDIVIDUAL DISTRIBUTORS\n{'#'*60}")
-                    for distributor in sorted(df_dist["distributeur"].unique()):
+                    for distributor in sorted(df_dist[Aliases.DISTRIBUTEUR].unique()):
                         df_distributor = (
-                            df_dist[df_dist["distributeur"] == distributor][
-                                ["annee", "mois", dist_var_col]
+                            df_dist[df_dist[Aliases.DISTRIBUTEUR] == distributor][
+                                [Aliases.ANNEE, Aliases.MOIS, dist_var_col]
                             ]
                             .copy()
                             .rename(columns={dist_var_col: config.data.target_variable})
@@ -390,12 +391,12 @@ if __name__ == "__main__":
                                 df_distributor, dist_var_col
                             )
                         df_train = df_distributor[
-                            (df_distributor["annee"] >= train_start) & (df_distributor["annee"] <= train_end)
+                            (df_distributor[Aliases.ANNEE] >= train_start) & (df_distributor[Aliases.ANNEE] <= train_end)
                         ]
                         monthly_matrix = create_monthly_matrix(
                             df_train, value_col=config.data.target_variable
                         )
-                        years = np.sort(df_train["annee"].unique())
+                        years = np.sort(df_train[Aliases.ANNEE].unique())
 
                         res = run_long_horizon_forecast(
                             monthly_matrix=monthly_matrix,
@@ -416,7 +417,7 @@ if __name__ == "__main__":
                         for y, v in zip(forecast_years, pred_annual):
                             actual = None
                             percent_error = None
-                            mask = df_distributor["annee"] == y
+                            mask = df_distributor[Aliases.ANNEE] == y
                             if not df_distributor.loc[mask, config.data.target_variable].empty:
                                 actual = df_distributor.loc[mask, config.data.target_variable].sum()
                                 percent_error = (
@@ -449,11 +450,11 @@ if __name__ == "__main__":
                         "All_Distributors",
                         [
                             f"Distributor_{d}"
-                            for d in sorted(df_dist["distributeur"].unique())
+                            for d in sorted(df_dist[Aliases.DISTRIBUTEUR].unique())
                         ],
                     )
                     df_all_dist = (
-                        df_dist.groupby(["annee", "mois"])
+                        df_dist.groupby([Aliases.ANNEE, Aliases.MOIS])
                         .agg({dist_var_col: "sum"})
                         .reset_index()
                         .rename(columns={dist_var_col: config.data.target_variable})
@@ -461,12 +462,12 @@ if __name__ == "__main__":
                     if config.data.impute_2020:
                         df_all_dist_agg = fill_2020_with_avg(df_all_dist_agg, dist_var_col)
                     df_train = df_all_dist[
-                        (df_all_dist["annee"] >= train_start) & (df_all_dist["annee"] <= train_end)
+                        (df_all_dist[Aliases.ANNEE] >= train_start) & (df_all_dist[Aliases.ANNEE] <= train_end)
                     ]
                     monthly_matrix = create_monthly_matrix(
                         df_train, value_col=config.data.target_variable
                     )
-                    years = np.sort(df_train["annee"].unique())
+                    years = np.sort(df_train[Aliases.ANNEE].unique())
 
                     res = run_long_horizon_forecast(
                         monthly_matrix=monthly_matrix,
@@ -489,7 +490,7 @@ if __name__ == "__main__":
                     for y, v in zip(forecast_years, pred_annual):
                         actual = None
                         percent_error = None
-                        mask = df_all_dist["annee"] == y
+                        mask = df_all_dist[Aliases.ANNEE] == y
                         if not df_all_dist.loc[mask, config.data.target_variable].empty:
                             actual = df_all_dist.loc[mask, config.data.target_variable].sum()
                             percent_error = (
@@ -525,20 +526,20 @@ if __name__ == "__main__":
                         ["Total_Regional", "All_Distributors"],
                     )
                     df_all_dist = (
-                        df_dist.groupby(["annee", "mois"])
+                        df_dist.groupby([Aliases.ANNEE, Aliases.MOIS])
                         .agg({dist_var_col: "sum"})
                         .reset_index()
                         .rename(columns={dist_var_col: config.data.target_variable})
                     )
                     df_total_regional = (
-                        df_regional.groupby(["annee", "mois"])
+                        df_regional.groupby([Aliases.ANNEE, Aliases.MOIS])
                         .agg({reg_var_col: "sum"})
                         .reset_index()
                         .rename(columns={reg_var_col: config.data.target_variable})
                     )
                     df_srm = (
                         pd.concat([df_total_regional, df_all_dist], ignore_index=True)
-                        .groupby(["annee", "mois"])
+                        .groupby([Aliases.ANNEE, Aliases.MOIS])
                         .agg({config.data.target_variable: "sum"})
                         .reset_index()
                     )
@@ -546,12 +547,12 @@ if __name__ == "__main__":
                     # if config.data.impute_2020:
                     #     df_srm = fill_2020_with_avg(df_srm, config.data.target_variable)
 
-                    df_srm = df_srm[df_srm["annee"] >= 2013]
-                    df_train = df_srm[df_srm["annee"] <= train_end]
+                    df_srm = df_srm[df_srm[Aliases.ANNEE] >= 2013]
+                    df_train = df_srm[df_srm[Aliases.ANNEE] <= train_end]
                     monthly_matrix = create_monthly_matrix(
                         df_train, value_col=config.data.target_variable
                     )
-                    years = np.sort(df_train["annee"].unique())
+                    years = np.sort(df_train[Aliases.ANNEE].unique())
 
                     res = run_long_horizon_forecast(
                         monthly_matrix=monthly_matrix,
@@ -574,7 +575,7 @@ if __name__ == "__main__":
                     for y, v in zip(forecast_years, pred_annual):
                         actual = None
                         percent_error = None
-                        mask = df_srm["annee"] == y
+                        mask = df_srm[Aliases.ANNEE] == y
                         if not df_srm.loc[mask, config.data.target_variable].empty:
                             actual = df_srm.loc[mask, config.data.target_variable].sum()
                             percent_error = (

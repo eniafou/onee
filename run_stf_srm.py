@@ -10,6 +10,7 @@ from short_term_forecast_strategies import run_analysis_for_entity, save_summary
 from onee.utils import clean_name
 from onee.config.stf_config import ShortTermForecastConfig
 from onee.data.loader import DataLoader
+from onee.data.names import Aliases
 
 # ────────────────────────────────────────────────────────────────────────────────
 # LOAD CONFIGURATION
@@ -58,7 +59,7 @@ if __name__ == "__main__":
         client_predictions_lookup = {}
         if True in use_monthly_clients_options:
             client_predictions_lookup = data_loader.load_client_prediction_lookup(TARGET_REGION)
-        activities = sorted(df_regional['activite'].unique())
+        activities = sorted(df_regional[Aliases.ACTIVITE].unique())
 
         all_results = []
 
@@ -71,7 +72,7 @@ if __name__ == "__main__":
             print(f"\n{'#'*60}\nLEVEL 1: INDIVIDUAL ACTIVITIES\n{'#'*60}")
             for activity in activities:
                 df_activity = (
-                    df_regional[df_regional['activite'] == activity][['annee', 'mois', reg_var_col]]
+                    df_regional[df_regional[Aliases.ACTIVITE] == activity][[Aliases.ANNEE, Aliases.MOIS, reg_var_col]]
                     .copy()
                     .rename(columns={reg_var_col: VARIABLE})
                 )
@@ -92,12 +93,12 @@ if __name__ == "__main__":
             print(f"\n{'#'*60}\nLEVEL 2: AGGREGATED BT\n{'#'*60}")
             mt_activities = ["Administratif_mt", "Agricole", "Industriel", "Résidentiel", "Tertiaire"]
             bt_activities = [a for a in activities if a not in mt_activities]
-            df_bt = df_regional[df_regional['activite'].isin(bt_activities)]
+            df_bt = df_regional[df_regional[Aliases.ACTIVITE].isin(bt_activities)]
             if df_bt.empty:
                 print("⚠️  Skipping: no BT activities found.")
             else:
                 df_bt_agg = (
-                    df_bt.groupby(['annee', 'mois'])
+                    df_bt.groupby([Aliases.ANNEE, Aliases.MOIS])
                     .agg({reg_var_col: 'sum'})
                     .reset_index()
                     .rename(columns={reg_var_col: VARIABLE})
@@ -121,12 +122,12 @@ if __name__ == "__main__":
         # LEVEL 3: AGGREGATED MT
         if 3 in RUN_LEVELS:
             print(f"\n{'#'*60}\nLEVEL 3: AGGREGATED MT\n{'#'*60}")
-            df_mt = df_regional[df_regional['activite'].isin(mt_activities)]
+            df_mt = df_regional[df_regional[Aliases.ACTIVITE].isin(mt_activities)]
             if df_mt.empty:
                 print("⚠️  Skipping: no MT activities found.")
             else:
                 df_mt_agg = (
-                    df_mt.groupby(['annee', 'mois'])
+                    df_mt.groupby([Aliases.ANNEE, Aliases.MOIS])
                     .agg({reg_var_col: 'sum'})
                     .reset_index()
                     .rename(columns={reg_var_col: VARIABLE})
@@ -150,7 +151,7 @@ if __name__ == "__main__":
         # LEVEL 4: TOTAL REGIONAL
         print_total_regional = 4 in RUN_LEVELS
         df_total_regional = (
-            df_regional.groupby(['annee', 'mois'])
+            df_regional.groupby([Aliases.ANNEE, Aliases.MOIS])
             .agg({reg_var_col: 'sum'})
             .reset_index()
             .rename(columns={reg_var_col: VARIABLE})
@@ -180,10 +181,10 @@ if __name__ == "__main__":
                 print(f"⚠️  Skipping: distributors data unsupported for VARIABLE='{VARIABLE}'.")
             else:
                 dist_var_col = var_cols["distributor"]
-                distributors = sorted(df_dist['distributeur'].unique())
+                distributors = sorted(df_dist[Aliases.DISTRIBUTEUR].unique())
                 for distributor in distributors:
                     df_distributor = (
-                        df_dist[df_dist['distributeur'] == distributor][['annee', 'mois', dist_var_col]]
+                        df_dist[df_dist[Aliases.DISTRIBUTEUR] == distributor][[Aliases.ANNEE, Aliases.MOIS, dist_var_col]]
                         .copy()
                         .rename(columns={dist_var_col: VARIABLE})
                     )
@@ -205,7 +206,7 @@ if __name__ == "__main__":
         if df_dist is not None:
             dist_var_col = var_cols["distributor"]
             df_all_dist = (
-                df_dist.groupby(['annee', 'mois'])
+                df_dist.groupby([Aliases.ANNEE, Aliases.MOIS])
                 .agg({dist_var_col: 'sum'})
                 .reset_index()
                 .rename(columns={dist_var_col: VARIABLE})
@@ -234,11 +235,11 @@ if __name__ == "__main__":
             else:
                 df_srm = (
                     pd.concat(
-                        [df_total_regional[['annee', 'mois', VARIABLE]],
-                        df_all_dist[['annee', 'mois', VARIABLE]]],
+                        [df_total_regional[[Aliases.ANNEE, Aliases.MOIS, VARIABLE]],
+                        df_all_dist[[Aliases.ANNEE, Aliases.MOIS, VARIABLE]]],
                         ignore_index=True
                     )
-                    .groupby(['annee', 'mois'])
+                    .groupby([Aliases.ANNEE, Aliases.MOIS])
                     .agg({VARIABLE: 'sum'})
                     .reset_index()
                 )

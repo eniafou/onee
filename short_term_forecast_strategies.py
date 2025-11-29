@@ -11,6 +11,7 @@ from onee.utils import (
     get_move_in_year,
     add_annual_client_feature
 )
+from onee.data.names import Aliases
 import numpy as np
 import pandas as pd
 from typing import Dict, Iterable, Mapping, Optional
@@ -485,7 +486,7 @@ def strategy1_ultra_strict_loocv(
                     )
                 if use_pf and pc_idx > 0:
                     X_train = add_monthly_feature(
-                        X_train, train_years_for_pc, df_monthly, feature="puissance facturée", agg_method="sum"
+                        X_train, train_years_for_pc, df_monthly, feature=Aliases.PUISSANCE_FACTUREE, agg_method="sum"
                     )
 
                 # Create test features (using past n_lags years)
@@ -527,7 +528,7 @@ def strategy1_ultra_strict_loocv(
                 if use_temp and pc_idx > 0:
                     X_test = add_monthly_feature(X_test, [years[test_idx]], df_monthly)
                 if use_pf and pc_idx > 0:
-                    X_test = add_monthly_feature(X_test, [years[test_idx]], df_monthly, feature="puissance facturée", agg_method="sum")
+                    X_test = add_monthly_feature(X_test, [years[test_idx]], df_monthly, feature=Aliases.PUISSANCE_FACTUREE, agg_method="sum")
                 if use_clients and pc_idx > 0:
                     X_test = add_monthly_client_feature(
                         X_test,
@@ -699,7 +700,7 @@ def strategy2_ultra_strict_loocv(
                 )
             if use_pf:
                 X_train = add_yearly_feature(
-                    X_train, train_years_list, df_monthly, feature="puissance facturée", agg_method="sum"
+                    X_train, train_years_list, df_monthly, feature=Aliases.PUISSANCE_FACTUREE, agg_method="sum"
                 )
 
             # Create test features
@@ -714,7 +715,7 @@ def strategy2_ultra_strict_loocv(
                 )
             if use_pf:
                 X_test = add_yearly_feature(
-                    X_test, [years[test_idx]], df_monthly, feature="puissance facturée", agg_method="sum"
+                    X_test, [years[test_idx]], df_monthly, feature=Aliases.PUISSANCE_FACTUREE, agg_method="sum"
                 )
 
             if years[test_idx] <= fold_training_end + 1:
@@ -942,7 +943,7 @@ def strategy3_ultra_strict_loocv(
                     )
                 if use_pf and pc_idx > 0:
                     X_train = add_monthly_feature(
-                        X_train, train_years_for_pc, df_monthly, feature="puissance facturée", agg_method="sum"
+                        X_train, train_years_for_pc, df_monthly, feature=Aliases.PUISSANCE_FACTUREE, agg_method="sum"
                     )
 
                 test_lag_indices = list(range(test_idx - n_lags, test_idx))
@@ -973,7 +974,7 @@ def strategy3_ultra_strict_loocv(
                     X_test = add_monthly_feature(X_test, [years[test_idx]], df_monthly)
                 
                 if use_pf and pc_idx > 0:
-                    X_test = add_monthly_feature(X_test, [years[test_idx]], df_monthly, feature="puissance facturée", agg_method="sum")
+                    X_test = add_monthly_feature(X_test, [years[test_idx]], df_monthly, feature=Aliases.PUISSANCE_FACTUREE, agg_method="sum")
 
                 best_alpha = alphas[0]
                 best_mae = float("inf")
@@ -1083,7 +1084,7 @@ def strategy3_ultra_strict_loocv(
                 )
             if use_pf:
                 X_train_annual = add_yearly_feature(
-                    X_train_annual, train_years_annual, df_monthly, feature="puissance facturée", agg_method="sum"
+                    X_train_annual, train_years_annual, df_monthly, feature=Aliases.PUISSANCE_FACTUREE, agg_method="sum"
                 )
 
             test_lags_annual = annual_consumption[test_idx - n_lags : test_idx]
@@ -1101,7 +1102,7 @@ def strategy3_ultra_strict_loocv(
                 )
             if use_pf:
                 X_test_annual = add_yearly_feature(
-                    X_test_annual, [years[test_idx]], df_monthly, feature="puissance facturée", agg_method="sum"
+                    X_test_annual, [years[test_idx]], df_monthly, feature=Aliases.PUISSANCE_FACTUREE, agg_method="sum"
                 )
 
             if years[test_idx] <= fold_training_end + 1:
@@ -1518,17 +1519,17 @@ def run_analysis_for_entity(
     if move_in_year is not None:
         move_in_year = move_in_year - 2
         # Ensure valid_data only includes years after the move-in date
-        valid_data = df[df["annee"].between(max(train_start_year, move_in_year), eval_years_end)]
+        valid_data = df[df[Aliases.ANNEE].between(max(train_start_year, move_in_year), eval_years_end)]
         print(f"📅 Move-in year detected: {move_in_year} → filtering from {max(train_start_year, move_in_year)} to {eval_years_end}")
     else:
-        valid_data = df[df["annee"].between(train_start_year, eval_years_end)]
+        valid_data = df[df[Aliases.ANNEE].between(train_start_year, eval_years_end)]
 
     if valid_data.empty:
         print(f"⚠️ No valid data for {entity_name} after applying move-in year filter.")
         return None
 
     monthly_matrix = create_monthly_matrix(valid_data, value_col=value_col)
-    years = np.array(sorted(valid_data["annee"].unique()))
+    years = np.array(sorted(valid_data[Aliases.ANNEE].unique()))
     clients_lookup = _normalize_monthly_lookup(client_predictions)
 
     # Run all strategies with ULTRA-STRICT LOOCV
@@ -1882,7 +1883,7 @@ def save_summary(all_results, output_file, monthly_book_file=None):
                     for col in ["PI_low", "PI_high"]:
                         if col not in df_y2.columns:
                             df_y2[col] = np.nan
-                    df_y2.insert(0, "Year", y)
+                    df_y2.insert(0, Aliases.ANNEE, y)
                     frames.append(df_y2)
 
                 if not frames:
@@ -1891,7 +1892,7 @@ def save_summary(all_results, output_file, monthly_book_file=None):
                 df_entity = pd.concat(frames, ignore_index=True)
                 # Consistent column order
                 cols = [
-                    "Year",
+                    Aliases.ANNEE,
                     "Month",
                     "Actual",
                     "Predicted",

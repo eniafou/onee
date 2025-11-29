@@ -9,6 +9,7 @@ from long_term_forecast_strategies import run_long_horizon_forecast
 from onee.utils import fill_2020_with_avg, get_move_in_year, clean_name
 from onee.config.ltf_config import LongTermForecastConfig
 from onee.data.loader import DataLoader
+from onee.data.names import Aliases
 
 import numpy as np
 import pandas as pd
@@ -64,95 +65,12 @@ if __name__ == "__main__":
         )
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # ────────────────────────────────────────────────────────────────
-        # LEVEL 1: INDIVIDUAL ACTIVITIES
-        # ────────────────────────────────────────────────────────────────
-        if 1 in RUN_LEVELS:
-            print(f"\n{'#'*60}\nLEVEL 1: CONTRAT\n{'#'*60}")
-            contrats = sorted(df_contrats['contrat'].unique())
-
-            established_contracts = []
-            growth_contracts = []
-            similarity_contracts = []
-
-            # --- Categorize contracts ---
-            for contrat in contrats:
-                df_contrat = df_contrats[df_contrats['contrat'] == contrat].copy()
-                move_in_year = get_move_in_year(df_contrat)
-
-                if move_in_year is None or move_in_year <= 2021:
-                    established_contracts.append(contrat)
-                elif move_in_year == 2022:
-                    growth_contracts.append(contrat)
-                elif move_in_year == 2023:
-                    similarity_contracts.append(contrat)
-
-            print(f"\n🟢 Established contracts: {len(established_contracts)}")
-            print(f"🚀 Growth contracts: {len(growth_contracts)}")
-            print(f"🔗 Similarity contracts: {len(similarity_contracts)}")
-
-
-            all_results_established = []
-            for i, contrat in enumerate(established_contracts):
-                df_contrat = df_contrats[df_contrats['contrat'] == contrat].copy()
-                # df_activity = fill_2020_with_avg(df_activity, config.data.target_variable)
-                df_train = df_contrat[
-                    (df_contrat["annee"] >= train_start) & (df_contrat["annee"] <= train_end)
-                ]
-                monthly_matrix = create_monthly_matrix(
-                    df_train, value_col=config.data.target_variable
-                )
-                years = np.sort(df_train["annee"].unique())
-
-                res = run_long_horizon_forecast(
-                    monthly_matrix=monthly_matrix,
-                    years=years,
-                    df_features=df_features,
-                    df_monthly=df_contrat,
-                    config=config,
-                    MODEL_REGISTRY=MODEL_REGISTRY,
-                )
-
-                forecast_years = [y for y, _ in res["horizon_predictions"]]
-                pred_annual = [float(v) for _, v in res["horizon_predictions"]]
-                actuals = []
-                percent_errors = []
-                for y, v in zip(forecast_years, pred_annual):
-                    actual = None
-                    percent_error = None
-                    mask = df_contrat["annee"] == y
-                    if not df_contrat.loc[mask, config.data.target_variable].empty:
-                        actual = df_contrat.loc[mask, config.data.target_variable].sum()
-                        percent_error = (
-                            (v - actual) / actual * 100 if actual != 0 else None
-                        )
-
-                    actuals.append(actual)
-                    percent_errors.append(percent_error)
-
-                all_results.append(
-                    {
-                        "train_start": train_start,
-                        "train_end": train_end,
-                        "level": f"Contrat_{contrat}",
-                        "forecast_years": forecast_years,
-                        "pred_annual": pred_annual,
-                        "pred_monthly": res["monthly_forecasts"],
-                        "run_parameters": res.get("run_parameters", {}),
-                        "actuals": actuals,
-                        "percent_errors": percent_errors,
-                    }
-                )
-            all_results_contrats = all_results_established
-            all_results += all_results_contrats
-        
         if 3 in RUN_LEVELS:
             print(f"\n{'#'*60}")
             print(f"LEVEL 3: ACTIVITE")
             print(f"{'#'*60}")
 
-            activites = sorted(df_contrats['activite'].unique())
-            # activites = ["ADMINISTRATION PUBLIQUE"]
+            activites = sorted(df_contrats[Aliases.ACTIVITE].unique())
 
             established_activites = []
             growth_activites = []
@@ -160,7 +78,7 @@ if __name__ == "__main__":
 
             # --- Categorize activities ---
             for activite in activites:
-                df_activite = df_contrats[df_contrats['activite'] == activite].copy()
+                df_activite = df_contrats[df_contrats[Aliases.ACTIVITE] == activite].copy()
                 move_in_year = get_move_in_year(df_activite)
 
                 if move_in_year is None or move_in_year <= 2021:
@@ -177,29 +95,23 @@ if __name__ == "__main__":
             # --- Process established activities ---
             all_results_established_activite = []
             for activite in established_activites:
-                print("###############################", activite)
-                df_activite = df_contrats[df_contrats['activite'] == activite].copy()
-                df_activite = df_activite.groupby(['annee', 'mois']).agg({
+                df_activite = df_contrats[df_contrats[Aliases.ACTIVITE] == activite].copy()
+                df_activite = df_activite.groupby([Aliases.ANNEE, Aliases.MOIS]).agg({
                     config.data.target_variable: 'sum',
-                    'puissance facturée': 'sum'
+                    Aliases.PUISSANCE_FACTUREE: 'sum'
                 }).reset_index()
                 
                 df_train = df_activite[
-                    (df_activite["annee"] >= train_start) & (df_activite["annee"] <= train_end)
+                    (df_activite[Aliases.ANNEE] >= train_start) & (df_activite[Aliases.ANNEE] <= train_end)
                 ]
                 monthly_matrix = create_monthly_matrix(
                     df_train, value_col=config.data.target_variable
                 )
-                years = np.sort(df_train["annee"].unique())
+                years = np.sort(df_train[Aliases.ANNEE].unique())
 
-                df_a = df_activite_features[df_activite_features["activite"] == activite]
-                df_a = df_a.merge(df_features, on ="annee")
-
-                config.features.feature_block = [
-                    # [],
-                    ['total_active_contrats', 'just_started', 'two_years_old', 'three_years_old', 'more_than_3_years_old', 'pib_mdh'],
-                    # ["pib_mdh", "gdp_primaire", "gdp_secondaire", "gdp_tertiaire"],
-                ]
+                df_a = df_activite_features[df_activite_features[Aliases.ACTIVITE] == activite]
+                df_a = df_a.merge(df_features, on=Aliases.ANNEE)
+ 
                 res = run_long_horizon_forecast(
                     monthly_matrix=monthly_matrix,
                     years=years,
@@ -218,7 +130,7 @@ if __name__ == "__main__":
                 for y, v in zip(forecast_years, pred_annual):
                     actual = None
                     percent_error = None
-                    mask = df_activite["annee"] == y
+                    mask = df_activite[Aliases.ANNEE] == y
                     if not df_activite.loc[mask, config.data.target_variable].empty:
                         actual = df_activite.loc[mask, config.data.target_variable].sum()
                         percent_error = (

@@ -6,6 +6,7 @@ from datetime import datetime
 import pandas as pd
 import plotly.express as px
 from typing import Union, Callable, Iterable, Mapping
+from onee.data.names import Aliases
 
 
 def custom_mean_absolute_percentage_error(y_true, y_pred, ignore_zeros=True):
@@ -27,8 +28,8 @@ def custom_mean_absolute_percentage_error(y_true, y_pred, ignore_zeros=True):
 def create_monthly_matrix(df, value_col):
     """Convert long format to year x month matrix"""
     pivot = df.pivot_table(
-        index='annee',
-        columns='mois',
+        index=Aliases.ANNEE,
+        columns=Aliases.MOIS,
         values=value_col,
         aggfunc='sum'
     )
@@ -38,11 +39,11 @@ def create_monthly_matrix(df, value_col):
     return pivot[sorted(pivot.columns)].values
 
 
-def plot_var_over_time(df, entity, entity_value, var="consommation"):
+def plot_var_over_time(df, entity, entity_value, var=Aliases.CONSOMMATION_KWH):
     subset = df[df[entity] == entity_value].copy()
 
     # Build a proper datetime column from year and month
-    subset["date"] = pd.to_datetime(subset["annee"].astype(str) + '-' + subset["mois"].astype(str) + '-01')
+    subset["date"] = pd.to_datetime(subset[Aliases.ANNEE].astype(str) + '-' + subset[Aliases.MOIS].astype(str) + '-01')
 
     # Sort by date so the line is continuous
     subset = subset.sort_values("date")
@@ -85,11 +86,11 @@ def add_exogenous_features(
         return X_lags
 
     df = df_features.copy()
-    missing = [c for c in feature_block + ['annee'] if c not in df.columns]
+    missing = [c for c in feature_block + [Aliases.ANNEE] if c not in df.columns]
     if missing:
         raise ValueError(f"Missing required columns in df_features: {missing}")
 
-    df = df.sort_values('annee').reset_index(drop=True)
+    df = df.sort_values(Aliases.ANNEE).reset_index(drop=True)
 
     if use_rate:
         F = df[feature_block].apply(pd.to_numeric, errors='coerce')
@@ -110,15 +111,15 @@ def add_exogenous_features(
             raise ValueError("change_type must be 'pct', 'diff', or 'log'")
 
         F_change = F_change.replace([np.inf, -np.inf], np.nan).fillna(fill_value)
-        df_exog = pd.concat([df[['annee']], F_change], axis=1)
+        df_exog = pd.concat([df[[Aliases.ANNEE]], F_change], axis=1)
 
     else:
         F_raw = df[feature_block].apply(pd.to_numeric, errors='coerce').fillna(fill_value)
-        df_exog = pd.concat([df[['annee']], F_raw], axis=1)
+        df_exog = pd.concat([df[[Aliases.ANNEE]], F_raw], axis=1)
 
     year_to_vals = (
-        df_exog.drop_duplicates(subset=['annee'])
-               .set_index('annee')[feature_block]
+        df_exog.drop_duplicates(subset=[Aliases.ANNEE])
+               .set_index(Aliases.ANNEE)[feature_block]
                .to_dict(orient='index')
     )
 
@@ -141,7 +142,7 @@ def add_monthly_feature(X, years, df_monthly, feature = "temperature", agg_metho
     """Add monthly feature values"""
     temp_data = []
     for year in years:
-        year_temps = df_monthly[df_monthly['annee'] == year].groupby('mois')[feature].agg(agg_method)
+        year_temps = df_monthly[df_monthly[Aliases.ANNEE] == year].groupby(Aliases.MOIS)[feature].agg(agg_method)
         temps = []
         for m in range(1, 13):
             val = year_temps.get(m, 0)
@@ -159,7 +160,7 @@ def add_yearly_feature(X, years, df_yearly, feature="temperature", agg_method="m
     """Add yearly feature values"""
     yearly_data = []
     for year in years:
-        val = df_yearly[df_yearly['annee'] == year][feature].agg(agg_method)
+        val = df_yearly[df_yearly[Aliases.ANNEE] == year][feature].agg(agg_method)
         if pd.isna(val):
             val = 0
         yearly_data.append([val])
@@ -242,15 +243,17 @@ def safe_parse_date(x):
 
     return None  # could not parse
 
-def get_move_in_year(df_c, consommation_col = "consommation_kwh", not_started_yet_th = 20, strict = False):
+def get_move_in_year(df_c, consommation_col = None, not_started_yet_th = 20, strict = False):
+    if consommation_col is None:
+        consommation_col = Aliases.CONSOMMATION_KWH
     """
-    Extract the first non-null 'Date d'emménagement' value from a DataFrame
+    Extract the first non-null 'DATE_EMMENAGEMENT' value from a DataFrame
     and return its year as an integer, or None if not available.
     """
-    if 'Date d\'emménagement' not in df_c.columns:
+    if Aliases.DATE_EMMENAGEMENT not in df_c.columns:
         return None
 
-    move_in_val = df_c['Date d\'emménagement'].dropna()
+    move_in_val = df_c[Aliases.DATE_EMMENAGEMENT].dropna()
     if move_in_val.empty:
         return None
 
@@ -263,15 +266,15 @@ def get_move_in_year(df_c, consommation_col = "consommation_kwh", not_started_ye
     if strict:
         return move_in_year
 
-    move_out_year = safe_parse_date(df_c['Date de déménagement'].dropna().iloc[0]).year
+    move_out_year = safe_parse_date(df_c[Aliases.DATE_DEMENAGEMENT].dropna().iloc[0]).year
     
-    max_year = df_c["annee"].max()
-    annual_consumption = df_c[df_c["annee"] == move_in_year][consommation_col].sum()
+    max_year = df_c[Aliases.ANNEE].max()
+    annual_consumption = df_c[df_c[Aliases.ANNEE] == move_in_year][consommation_col].sum()
     while annual_consumption <= not_started_yet_th and (move_out_year is None or move_in_year < move_out_year):
         move_in_year+=1
         if move_in_year >= max_year:
             break
-        annual_consumption = df_c[df_c["annee"] == move_in_year][consommation_col].sum()
+        annual_consumption = df_c[df_c[Aliases.ANNEE] == move_in_year][consommation_col].sum()
 
     return move_in_year
 
@@ -281,10 +284,10 @@ def get_move_out_year(df_c):
     Extract the last non-null 'Date de déménagement' value from a DataFrame
     and return its year as an integer, or None if not available.
     """
-    if "Date de déménagement" not in df_c.columns:
+    if Aliases.DATE_DEMENAGEMENT not in df_c.columns:
         return None
 
-    move_out_vals = df_c["Date de déménagement"].dropna()
+    move_out_vals = df_c[Aliases.DATE_DEMENAGEMENT].dropna()
     if move_out_vals.empty:
         return None
 
@@ -413,17 +416,17 @@ def fill_2020_with_avg(df, value_col):
     df = df.copy()
     
     # Extract 2019, 2020, 2021 subsets
-    df_2019 = df[df["annee"] == 2019][["mois", value_col]].rename(columns={value_col: "v2019"})
-    df_2021 = df[df["annee"] == 2021][["mois", value_col]].rename(columns={value_col: "v2021"})
+    df_2019 = df[df[Aliases.ANNEE] == 2019][[Aliases.MOIS, value_col]].rename(columns={value_col: "v2019"})
+    df_2021 = df[df[Aliases.ANNEE] == 2021][[Aliases.MOIS, value_col]].rename(columns={value_col: "v2021"})
     
     # Merge 2019 and 2021 month-wise
-    avg_2019_2021 = pd.merge(df_2019, df_2021, on="mois", how="inner")
+    avg_2019_2021 = pd.merge(df_2019, df_2021, on=Aliases.MOIS, how="inner")
     avg_2019_2021["avg"] = avg_2019_2021[["v2019", "v2021"]].mean(axis=1)
     
     # Insert the computed average into 2020 rows
-    df.loc[df["annee"] == 2020, value_col] = (
-        df.loc[df["annee"] == 2020, "mois"]
-          .map(avg_2019_2021.set_index("mois")["avg"])
+    df.loc[df[Aliases.ANNEE] == 2020, value_col] = (
+        df.loc[df[Aliases.ANNEE] == 2020, Aliases.MOIS]
+          .map(avg_2019_2021.set_index(Aliases.MOIS)["avg"])
           .values
     )
     

@@ -49,10 +49,7 @@ features:
     - [1, 2]
   
   feature_block:
-    - []
-    - [pib_mdh]
-    - [gdp_primaire, gdp_secondaire, gdp_tertiaire]
-    - [pib_mdh, gdp_primaire, gdp_secondaire, gdp_tertiaire]
+    - [total_active_contrats, just_started, two_years_old, three_years_old, more_than_3_years_old, pib_mdh]
   
   use_pf: [true]
   use_clients: [false]

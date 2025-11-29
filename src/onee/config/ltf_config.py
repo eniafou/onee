@@ -7,6 +7,7 @@ from pathlib import Path
 from typing import List, Tuple, Optional, Union, Literal, Any, Dict, Annotated
 from pydantic import BaseModel, Field, field_validator, model_validator
 import yaml
+from onee.data.names import Aliases
 
 
 # ═══════════════════════════════════════════════════════════════════════
@@ -33,7 +34,7 @@ class ProjectConfig(BaseModel):
 
 class DataConfig(BaseModel):
     """Data sources, regions, run levels, target variables"""
-    target_variable: str = "consommation_kwh"
+    target_variable: str = Aliases.CONSOMMATION_KWH
     unit: str = "Kwh"
     regions: Optional[List[str]] = None  # For SRM; None for CD
     run_levels: List[int]  # Which analysis levels to execute
@@ -79,12 +80,11 @@ class FeaturesConfig(BaseModel):
     feature_block: List[List[str]] = Field(
         default=[
             [],
-            ["pib_mdh"],
-            ["gdp_primaire", "gdp_secondaire", "gdp_tertiaire"],
-            ["pib_mdh", "gdp_primaire", "gdp_secondaire", "gdp_tertiaire"],
+            [Aliases.PIB_MDH],
+            [Aliases.GDP_PRIMAIRE, Aliases.GDP_SECONDAIRE, Aliases.GDP_TERTIAIRE],
+            [Aliases.PIB_MDH, Aliases.GDP_PRIMAIRE, Aliases.GDP_SECONDAIRE, Aliases.GDP_TERTIAIRE],
         ],
         description="Exogenous feature combinations to try",
-        alias="feature_blocks"
     )
     use_pf: List[bool] = Field(default=[False], description="Use power factor")
     use_clients: List[bool] = Field(default=[True], description="Use client counts")
@@ -151,7 +151,7 @@ class IntensityForecastWrapperConfig(BaseModelConfig):
     model_type: Literal["IntensityForecastWrapper"] = "IntensityForecastWrapper"
     
     # Normalization
-    normalization_col: List[str] = Field(default=["total_active_contrats"])
+    normalization_col: List[str] = Field(default=[Aliases.TOTAL_ACTIVE_CONTRATS], description="Column for normalization")
     
     # Internal model configuration (typically GaussianProcess)
     internal_model_type: List[str] = Field(
