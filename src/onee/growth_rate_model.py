@@ -19,36 +19,6 @@ from sklearn.gaussian_process.kernels import RBF, WhiteKernel, DotProduct, Const
 import os
 import re
 
-
-
-# ============================================================================
-# CONFIGURATION
-# ============================================================================
-
-PROJECT_ROOT = Path(__file__).resolve().parents[0]
-
-# Database paths
-DB_REGIONAL_PATH = PROJECT_ROOT / 'data/ONEE_Regional_COMPLETE_2007_2023.db'
-DB_DIST_PATH = PROJECT_ROOT / 'data/ONEE_Distributeurs_consumption.db'
-
-# Analysis settings
-TARGET_REGION = "Casablanca-Settat"
-TARGET_ACTIVITY = "Administratif" #"Menages"
-VARIABLE = "consommation_kwh"
-TRAINING_END = 2018
-TRAIN_WINDOW = None
-# Model settings
-INCLUDE_AR = True          # Include autoregressive component ρ*Δlog(y_t)
-INCLUDE_EXOG = True        # Include exogenous features z_t'γ
-FEATURE_TRANSFORMS = ("lag_lchg",)  #("level", "lag", "lchg", "lag_lchg")
-EXOG_LAGS = (1,)
-L2_PENALTY = 10.0           # L2 regularization strength (like Ridge alpha)
-RHO_BOUNDS = (0.0, 1)   # Bounds for ρ (stationarity constraint)
-
-# ============================================================================
-# 1. DATA LOADING (Same as before)
-# ============================================================================
-
 def build_growth_rate_features(
     years: Iterable[int],
     feature_block: Iterable[str],
@@ -625,13 +595,69 @@ class IntensityForecastWrapper(BaseForecastModel):
     It trains the internal model on (y / normalization_col) and 
     scales the output back up by (normalization_col) during prediction.
     """
-    SUPPORTED_HYPERPARAMS = ["normalization_col"]
+    SUPPORTED_HYPERPARAMS = [
+        "normalization_col",
+        "internal_model_type",
+        "n_restarts_optimizer",
+        "normalize_y",
+        "use_log_transform",
+        "alpha",
+        "prior_type",
+        "prior_power",
+        "prior_min_annual_growth",
+        "prior_anchor_window",
+        "prior_force_positive_growth"
+    ]
 
 
-    def __init__(self, normalization_col: str = "total_active_contrats", internal_model: BaseForecastModel = None):
-        if internal_model is None:
-            self.model = GaussianProcessForecastModel(use_log_transform=False)
+    def __init__(self, 
+                 normalization_col: str = "total_active_contrats", 
+                 internal_model: BaseForecastModel = None,
+                 internal_model_type: str = "GaussianProcessForecastModel",
+                 # GP parameters
+                 n_restarts_optimizer: int = 10,
+                 normalize_y: bool = True,
+                 use_log_transform: bool = False,
+                 alpha: float = 1e-10,
+                 # Prior parameters
+                 prior_type: str = "PowerGrowthPrior",
+                 prior_power: float = 2.0,
+                 prior_min_annual_growth: float = 0.0,
+                 prior_anchor_window: int = 3,
+                 prior_force_positive_growth: bool = False,
+                 **kwargs):
+        """
+        Wrapper that normalizes predictions by a column (e.g., total_active_contrats).
+        
+        Parameters
+        ----------
+        normalization_col : str
+            Column name to use for normalization
+        internal_model : BaseForecastModel, optional
+            Pre-configured internal model. If None, creates one based on internal_model_type
+        internal_model_type : str
+            Type of internal model to create if internal_model is None
+        """
         self.norm_col = normalization_col
+        
+        if internal_model is None:
+            if internal_model_type == "GaussianProcessForecastModel":
+                self.model = GaussianProcessForecastModel(
+                    use_log_transform=use_log_transform,
+                    n_restarts_optimizer=n_restarts_optimizer,
+                    normalize_y=normalize_y,
+                    alpha=alpha,
+                    prior_type=prior_type,
+                    prior_power=prior_power,
+                    prior_min_annual_growth=prior_min_annual_growth,
+                    prior_anchor_window=prior_anchor_window,
+                    prior_force_positive_growth=prior_force_positive_growth
+                )
+            else:
+                raise ValueError(f"Unknown internal_model_type: {internal_model_type}")
+        else:
+            self.model = internal_model
+            
         self.fitted_params = {}
 
     def fit(self, *, y: Optional[np.ndarray] = None, years: Optional[np.ndarray] = None, X: Optional[np.ndarray] = None, normalization_arr: Optional[np.ndarray] = None, **kwargs):
@@ -832,7 +858,11 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
         "normalize_y", 
         "random_state",
         "use_log_transform",
-        "min_annual_growth"
+        "prior_type",
+        "prior_power",
+        "prior_min_annual_growth",
+        "prior_anchor_window",
+        "prior_force_positive_growth"
     ]
 
     def __init__(self, 
@@ -842,7 +872,12 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
                  normalize_y=True, 
                  random_state=42, 
                  use_log_transform=True, 
-                 prior_config = None,
+                 prior_type="PowerGrowthPrior",
+                 prior_power=0.5,
+                 prior_min_annual_growth=0.0,
+                 prior_anchor_window=3,
+                 prior_force_positive_growth=False,
+                 **kwargs
                  ):
         """
         GPR Model for probabilistic extrapolation.
@@ -858,6 +893,16 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
             Number of restarts of the optimizer for finding the kernel's parameters.
         normalize_y : bool
             Whether to normalize the target values y by removing the mean and scaling.
+        prior_type : str
+            Type of prior: 'LinearGrowthPrior', 'PowerGrowthPrior', or 'FlatPrior'
+        prior_power : float
+            Power parameter for PowerGrowthPrior (only used if prior_type='PowerGrowthPrior')
+        prior_min_annual_growth : float
+            Minimum annual growth for LinearGrowthPrior (only used if prior_type='LinearGrowthPrior')
+        prior_anchor_window : int
+            Number of recent years to anchor the prior
+        prior_force_positive_growth : bool
+            Force positive growth (for PowerGrowthPrior)
         """
         self._process_init(locals(), GaussianProcessForecastModel)
 
@@ -868,11 +913,29 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
             "normalize_y": normalize_y,
             "random_state": random_state,
             "use_log_transform": use_log_transform,
-            **(prior_config or {})
+            "prior_type": prior_type,
+            "prior_power": prior_power,
+            "prior_min_annual_growth": prior_min_annual_growth,
+            "prior_anchor_window": prior_anchor_window,
+            "prior_force_positive_growth": prior_force_positive_growth,
         }
-        if not prior_config:
-            self.prior = FlatPrior()
-            # self.prior = PowerGrowthPrior(force_positive_growth=False, power=2)
+        
+        # Initialize prior based on configuration
+        if prior_type == "LinearGrowthPrior":
+            self.prior = LinearGrowthPrior(
+                min_annual_growth=prior_min_annual_growth,
+                anchor_window=prior_anchor_window
+            )
+        elif prior_type == "PowerGrowthPrior":
+            self.prior = PowerGrowthPrior(
+                power=prior_power,
+                anchor_window=prior_anchor_window,
+                force_positive_growth=prior_force_positive_growth
+            )
+        elif prior_type == "FlatPrior":
+            self.prior = FlatPrior(method="mean")
+        else:
+            raise ValueError(f"Unknown prior_type: {prior_type}. Choose from: LinearGrowthPrior, PowerGrowthPrior, FlatPrior")
         
         self.prior_model = None
         self.prior_slope = None

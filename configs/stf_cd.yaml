@@ -1,0 +1,74 @@
+# ═══════════════════════════════════════════════════════════════════════
+# ONEE FPCA Forecast Configuration - CD (Contrats/Distributeurs)
+# ═══════════════════════════════════════════════════════════════════════
+
+# ───────────────────────────────────────────────────────────────────────
+# PROJECT
+# ───────────────────────────────────────────────────────────────────────
+project:
+  project_root: .
+  exp_name: temp
+
+# ───────────────────────────────────────────────────────────────────────
+# DATA
+# ───────────────────────────────────────────────────────────────────────
+data:
+  variable: consommation
+  unit: Mwh
+  regions: null  # CD operates on contracts, not regions
+  run_levels: [1]  # 1: Contrat, 2: Partenaire, 3: Activities
+  
+  # Database paths
+  db_regional: data/ONEE_Regional_COMPLETE_2007_2023.db
+  db_distributors: null
+  db_cd: data/cd_database_2013_2023.db
+
+# ───────────────────────────────────────────────────────────────────────
+# EVALUATION
+# ───────────────────────────────────────────────────────────────────────
+evaluation:
+  eval_years_start: 2021
+  eval_years_end: 2023
+  train_start_year: 2007
+  training_end: null
+
+# ───────────────────────────────────────────────────────────────────────
+# FEATURES
+# ───────────────────────────────────────────────────────────────────────
+features:
+  feature_blocks:
+    none: []
+    gdp_only: [pib_mdh]
+    sectoral_only: [gdp_primaire, gdp_secondaire, gdp_tertiaire]
+    gdp_sectoral: [pib_mdh, gdp_primaire, gdp_secondaire, gdp_tertiaire]
+  
+  growth_feature_transforms:
+    - [lag_lchg]
+  
+  growth_feature_lags:
+    - [1]
+  
+  use_monthly_temp_options: [false]
+  use_monthly_clients_options: [false]
+  use_pf_options: [true, false]
+
+# ───────────────────────────────────────────────────────────────────────
+# MODEL HYPERPARAMETERS
+# ───────────────────────────────────────────────────────────────────────
+model:
+  n_pcs: 3
+  lags_options: [1, 2]
+  alphas: [0.01, 0.1, 1.0, 10.0]
+  pc_weights: [0.5, 0.8]
+  pca_lambdas: [0.2, 0.3, 0.4]
+  training_windows: [1, 2, 3, 4]
+  client_pattern_weights: [0.3, 0.5, 0.8]
+  r2_threshold: 0.6
+
+# ───────────────────────────────────────────────────────────────────────
+# LOSS CONFIGURATION
+# ───────────────────────────────────────────────────────────────────────
+loss:
+  favor_overestimation: true
+  under_estimation_penalty: 1.5
+  penalties_by_level: null

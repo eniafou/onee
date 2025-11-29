@@ -1,0 +1,88 @@
+# ═══════════════════════════════════════════════════════════════════════
+# ONEE Horizon Forecast Configuration - CD (Contrats/Distributeurs)
+# ═══════════════════════════════════════════════════════════════════════
+
+# ───────────────────────────────────────────────────────────────────────
+# PILLAR 1: PROJECT
+# ───────────────────────────────────────────────────────────────────────
+project:
+  project_root: .  # Will be resolved to absolute path
+  exp_name: gp_1
+  output_base_dir: outputs_horizon_cd
+
+# ───────────────────────────────────────────────────────────────────────
+# PILLAR 2: DATA
+# ───────────────────────────────────────────────────────────────────────
+data:
+  target_variable: consommation
+  unit: Kwh
+  impute_2020: false
+  
+  # No regions for CD (operates on contracts/activities)
+  regions: null
+  
+  # Run levels for CD:
+  # 1: Individual Contracts
+  # 2: Partenaire (clients)
+  # 3: Activities
+  run_levels: [3]
+  
+  # Database paths (relative to project_root)
+  db_regional: data/ONEE_Regional_COMPLETE_2007_2023.db
+  db_distributors: null
+  db_cd: data/cd_database_2013_2023.db
+
+# ───────────────────────────────────────────────────────────────────────
+# PILLAR 3: TEMPORAL
+# ───────────────────────────────────────────────────────────────────────
+temporal:
+  horizon: 5
+  forecast_runs:
+    - [2007, 2018]
+
+# ───────────────────────────────────────────────────────────────────────
+# PILLAR 4: FEATURES
+# ───────────────────────────────────────────────────────────────────────
+features:
+  transforms:
+    - [level]
+  
+  lags:
+    - [1, 2]
+  
+  feature_block:
+    - []
+    - [pib_mdh]
+    - [gdp_primaire, gdp_secondaire, gdp_tertiaire]
+    - [pib_mdh, gdp_primaire, gdp_secondaire, gdp_tertiaire]
+  
+  use_pf: [true]
+  use_clients: [false]
+  training_window: [null]
+
+# ───────────────────────────────────────────────────────────────────────
+# PILLAR 5: MODELS
+# ───────────────────────────────────────────────────────────────────────
+models:
+  r2_threshold: 0.6
+  
+  models:
+    # ─── Intensity Forecast Wrapper (CD-specific) ───
+    - model_type: IntensityForecastWrapper
+      
+      # IntensityForecastWrapper-specific
+      normalization_col: [total_active_contrats]
+      internal_model_type: [GaussianProcessForecastModel]
+      
+      # GP parameters for internal model
+      n_restarts_optimizer: [10]
+      normalize_y: [true, false]
+      use_log_transform: [false]  # Usually false for intensity models
+      alpha: [1e-10]
+      
+      # Prior Configuration for internal GP model
+      prior_type: [PowerGrowthPrior]  # Options: LinearGrowthPrior, PowerGrowthPrior, FlatPrior
+      prior_power: [2.0]  # Higher power = closer to linear (less slowing)
+      prior_min_annual_growth: [0.0]
+      prior_anchor_window: [3]
+      prior_force_positive_growth: [false]

@@ -36,8 +36,8 @@ def run_annual_loocv_grid_search(
     # -------------------------------------------------------------------------
     # Extract grid dicts from pydantic objects
     # -------------------------------------------------------------------------
-    fg = feature_building_grid.dict()
-    mg = model_hyperparameter_grid.dict()
+    fg = feature_building_grid.model_dump()
+    mg = model_hyperparameter_grid.model_dump()
 
     mg = {
         k: v for k, v in mg.items() 
@@ -244,7 +244,8 @@ def run_long_horizon_forecast(
     # Step 1. Run LOOCV search across all param combinations from ForecastConfig
     all_results = []
 
-    for model_name in config.general_params.model_classes:
+    for model_config in config.models.models:
+        model_name = model_config.model_type
         model_class = MODEL_REGISTRY[model_name]
         results = run_annual_loocv_grid_search(
             monthly_matrix=monthly_matrix,
@@ -253,13 +254,13 @@ def run_long_horizon_forecast(
             df_monthly=df_monthly,
             monthly_clients_lookup=monthly_clients_lookup,
             GrowthModelClass=model_class,
-            feature_building_grid=config.feature_building_grid,
-            model_hyperparameter_grid=config.model_hyperparameter_grid,
+            feature_building_grid=config.features,
+            model_hyperparameter_grid=model_config,
             metric_fn=calculate_all_annual_metrics,
         )
         all_results+=results
 
-    best_result = select_best_model(all_results, r2_threshold=config.general_params.r2_threshold)
+    best_result = select_best_model(all_results, r2_threshold=config.models.r2_threshold)
 
     print(
         f"\n🏆 Best model: {best_result['model_name']} | R²={best_result.get('annual_r2', 0):.3f}"
@@ -301,7 +302,7 @@ def run_long_horizon_forecast(
     horizon_preds = growth_model.forecast_horizon(
         df_features=df_features,
         start_year=last_year,
-        horizon=config.general_params.horizon,
+        horizon=config.temporal.horizon,
         monthly_clients_lookup=monthly_clients_lookup,
         df_monthly=df_monthly,
         feature_config=best_result["feature_config"]

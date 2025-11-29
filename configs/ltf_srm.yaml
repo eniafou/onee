@@ -1,0 +1,98 @@
+# ═══════════════════════════════════════════════════════════════════════
+# ONEE Horizon Forecast Configuration - SRM (Regional)
+# ═══════════════════════════════════════════════════════════════════════
+
+# ───────────────────────────────────────────────────────────────────────
+# PILLAR 1: PROJECT
+# ───────────────────────────────────────────────────────────────────────
+project:
+  project_root: .  # Will be resolved to absolute path
+  exp_name: gp_test
+  output_base_dir: outputs_horizon
+
+# ───────────────────────────────────────────────────────────────────────
+# PILLAR 2: DATA
+# ───────────────────────────────────────────────────────────────────────
+data:
+  target_variable: consommation_kwh
+  unit: Kwh
+  impute_2020: false
+  
+  # Regions to process
+  regions:
+    - Casablanca-Settat
+    - Béni Mellal-Khénifra
+    - Drâa-Tafilalet
+    - Fès-Meknès
+    - Laâyoune-Sakia El Hamra
+    - Marrakech-Safi
+    - Oriental
+    - Rabat-Salé-Kénitra
+    - Tanger-Tétouan-Al Hoceïma
+    - Souss-Massa
+  
+  # Run levels:
+  # 1: Individual Activities
+  # 2: Aggregated BT
+  # 3: Aggregated MT
+  # 4: Total Regional
+  # 5: Individual Distributors
+  # 6: All Distributors
+  # 7: SRM (Regional + Distributors)
+  run_levels: [4, 6, 7]
+  
+  # Database paths (relative to project_root)
+  db_regional: data/ONEE_Regional_COMPLETE_2007_2023.db
+  db_distributors: data/ONEE_Distributeurs_consumption.db
+  db_cd: null
+
+# ───────────────────────────────────────────────────────────────────────
+# PILLAR 3: TEMPORAL
+# ───────────────────────────────────────────────────────────────────────
+temporal:
+  horizon: 5
+  forecast_runs:
+    - [2013, 2018]
+
+# ───────────────────────────────────────────────────────────────────────
+# PILLAR 4: FEATURES
+# ───────────────────────────────────────────────────────────────────────
+features:
+  transforms:
+    - [lchg]
+    - [lchg, lag_lchg]
+  
+  lags:
+    - [1, 2]
+  
+  feature_block:
+    - []
+    - [pib_mdh]
+    - [gdp_primaire, gdp_secondaire, gdp_tertiaire]
+    - [pib_mdh, gdp_primaire, gdp_secondaire, gdp_tertiaire]
+  
+  use_pf: [false]
+  use_clients: [true]
+  training_window: [null]
+
+# ───────────────────────────────────────────────────────────────────────
+# PILLAR 5: MODELS
+# ───────────────────────────────────────────────────────────────────────
+models:
+  r2_threshold: 0.6
+  
+  models:
+    # ─── Gaussian Process Model ───
+    - model_type: GaussianProcessForecastModel
+      # GP-specific
+      n_restarts_optimizer: [10]
+      normalize_y: [true, false]
+      use_log_transform: [true]
+      alpha: [1e-10]
+      
+      # Prior Configuration
+      prior_type: [LinearGrowthPrior]  # Options: LinearGrowthPrior, PowerGrowthPrior, FlatPrior
+      prior_power: [0.5]  # For PowerGrowthPrior: 0.5 = sqrt (moderate slowing), 1.0 = linear
+      prior_min_annual_growth: [0.02]  # For LinearGrowthPrior: minimum growth floor
+      prior_anchor_window: [3]  # Number of recent years to anchor prior
+      prior_force_positive_growth: [false]  # Force positive growth in PowerGrowthPrior

@@ -4,9 +4,8 @@ import sys
 import warnings
 
 import pandas as pd
-import sqlite3
 from pathlib import Path
-from forecast_strategies import run_analysis_for_entity, save_summary, get_move_in_year
+from short_term_forecast_strategies import run_analysis_for_entity, save_summary, get_move_in_year
 from new_entities_handlers import handle_growth_entity, handle_similarity_entity, filter_established_entities, handle_similarity_entity_prediction, handle_growth_entity_prediction
 import pickle
 import joblib
@@ -14,94 +13,37 @@ warnings.filterwarnings('ignore')
 
 import numpy as np
 import pandas as pd
+from onee.config.stf_config import ShortTermForecastConfig
+from onee.data.loader import DataLoader
 
 # ============================================================================
-# CONFIGURATION - ULTRA-STRICT NO DATA LEAKAGE
+# LOAD CONFIGURATION
 # ============================================================================
-PROJECT_ROOT = Path(__file__).resolve().parents[0]
+config_path = Path(__file__).parent / "configs/stf_cd.yaml"
+config = ShortTermForecastConfig.from_yaml(config_path)
 
-VARIABLE = "consommation"
-UNIT = "Mwh"
-exp_name = "temp"
-# Choose which analysis parts (levels) to run
-# 1: Contrat, 2: Partenaire (client), 3: Activities
-RUN_LEVELS = {1}
+# Convert to legacy ANALYSIS_CONFIG format
+ANALYSIS_CONFIG = config.to_analysis_config()
 
-N_PCS = 3
-LAGS_OPTIONS = [1,2]
-ALPHAS = [0.01, 0.1, 1.0, 10.0]
-R2_THRESHOLD = 0.6
-PC_WEIGHTS = [0.5, 0.8]
-PCA_LAMBDAS = [0.2, 0.3, 0.4] #[0.3, 0.7, 1.0]
-
-training_end = None
-use_monthly_temp_options = [False]
-use_monthly_clients_options = [False]
-use_pf_options = [True, False]
-client_pattern_weights = [0.3, 0.5, 0.8]
-training_windows = [1, 2, 3, 4] #0,1
-
-FEATURE_BLOCKS = {
-    'none': [],
-    'gdp_only': ['pib_mdh'],
-    'sectoral_only': ['gdp_primaire', 'gdp_secondaire', 'gdp_tertiaire'],
-    'gdp_sectoral': ['pib_mdh', 'gdp_primaire', 'gdp_secondaire', 'gdp_tertiaire'],
-}
-eval_years_start = 2021
-eval_years_end = 2023
-train_start_year = 2018
-
-growth_feature_transforms = [("lag_lchg",)]
-growth_feature_lags = [(1,)]
-
-
-ANALYSIS_CONFIG = {
-    "value_col": VARIABLE,
-    "N_PCS": N_PCS,
-    "LAGS_OPTIONS": LAGS_OPTIONS,
-    "FEATURE_BLOCKS": FEATURE_BLOCKS,
-    "ALPHAS": ALPHAS,
-    "PC_WEIGHTS": PC_WEIGHTS,
-    "R2_THRESHOLD": R2_THRESHOLD,
-    "unit": UNIT,
-    "PCA_LAMBDAS": PCA_LAMBDAS,
-    "training_end": training_end,
-    "use_monthly_temp_options": use_monthly_temp_options,
-    "use_monthly_clients_options": use_monthly_clients_options,
-    "use_pf_options":use_pf_options,
-    "client_pattern_weights": client_pattern_weights,
-    "training_windows": training_windows,
-    "train_start_year": train_start_year,
-    "eval_years_end": eval_years_end,
-    "eval_years_start": eval_years_start,
-    "growth_feature_transforms": growth_feature_transforms,
-    "growth_feature_lags": growth_feature_lags,
-}
+# Extract commonly used values
+PROJECT_ROOT = config.project.project_root
+VARIABLE = config.data.variable
+RUN_LEVELS = config.data.run_levels
+exp_name = config.project.exp_name
 
 # ============================================================================
 # LOAD DATA
 # ============================================================================
-db_path = PROJECT_ROOT / 'data/ONEE_Regional_COMPLETE_2007_2023.db'
+data_loader = DataLoader(PROJECT_ROOT)
 
-db_regional = sqlite3.connect(db_path)
+db_path = config.data.db_regional
+db_cd_path = config.data.db_cd
 
-query_features = f"""
-SELECT Year as annee, 
-       SUM(GDP_Millions_DH) as pib_mdh,
-       SUM(GDP_Primaire) as gdp_primaire,
-       SUM(GDP_Secondaire) as gdp_secondaire,
-       SUM(GDP_Tertiaire) as gdp_tertiaire,
-       AVG(temp) as temperature_annuelle
-FROM regional_features
-GROUP BY Year
-"""
-df_features = pd.read_sql_query(query_features, db_regional)
-
-db_regional.close()
-
-df_path = PROJECT_ROOT / "data/cd_data_2013_2023.csv"
-
-df_contrats = pd.read_csv(df_path)
+df_contrats, df_features, _ = data_loader.load_cd_data(
+    db_regional_path=db_path,
+    db_cd_path=db_cd_path,
+    include_activite_features=False,
+)
 
 # ============================================================================
 # MAIN ANALYSIS
@@ -152,8 +94,8 @@ if 1 in RUN_LEVELS:
             f"Contrat_{contrat}",
             df_features,
             config=ANALYSIS_CONFIG,
-            favor_overestimation=True,
-            under_estimation_penalty=1.5,
+            favor_overestimation=config.loss.favor_overestimation,
+            under_estimation_penalty=config.loss.under_estimation_penalty,
         )
         if result:
             all_results_established.append(result)
@@ -192,8 +134,8 @@ if 2 in RUN_LEVELS:
             df_partenaire, 
             f"Partenaire_{partenaire}", 
             df_features,
-            config = ANALYSIS_CONFIG,
-            under_estimation_penalty = 1.5,
+            config=ANALYSIS_CONFIG,
+            under_estimation_penalty=config.loss.under_estimation_penalty,
         )
         if result:
             all_results.append(result)
@@ -241,8 +183,8 @@ if 3 in RUN_LEVELS:
             f"Activité_{activite}",
             df_features,
             config=ANALYSIS_CONFIG,
-            favor_overestimation=True,
-            under_estimation_penalty=1.5,
+            favor_overestimation=config.loss.favor_overestimation,
+            under_estimation_penalty=config.loss.under_estimation_penalty,
         )
         if result:
             all_results_established_activite.append(result)

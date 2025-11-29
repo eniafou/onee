@@ -428,3 +428,18 @@ def fill_2020_with_avg(df, value_col):
     )
     
     return df
+
+
+def require_columns(df: pd.DataFrame, cols: list[str], ctx: str):
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        raise KeyError(f"Missing columns in {ctx}: {missing}")
+
+
+def clean_name(name: str) -> str:
+    return (
+        name.replace(":", "_")
+        .replace("/", "_")
+        .replace("\\", "_")
+        .replace(" ", "_")
+    )
