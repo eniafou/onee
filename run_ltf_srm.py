@@ -53,8 +53,7 @@ if __name__ == "__main__":
 
         # Load data using DataLoader
         df_regional, df_features, df_dist, var_cols = data_loader.load_srm_data(
-            db_regional_path=config.project.project_root / config.data.db_regional,
-            db_dist_path=config.project.project_root / config.data.db_distributors,
+            db_path=config.project.project_root / config.data.db_path,
             variable=config.data.target_variable,
             target_region=TARGET_REGION,
         )

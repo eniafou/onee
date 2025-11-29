@@ -42,9 +42,8 @@ data:
   run_levels: [4, 6, 7]
   
   # Database paths (relative to project_root)
-  db_regional: data/ONEE_Regional_COMPLETE_2007_2023.db
-  db_distributors: data/ONEE_Distributeurs_consumption.db
-  db_cd: null
+  db_path: data/all_data.db
+
 
 # ───────────────────────────────────────────────────────────────────────
 # PILLAR 3: TEMPORAL

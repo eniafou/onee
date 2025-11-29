@@ -38,9 +38,8 @@ data:
   run_levels: [1, 4]
   
   # Database paths
-  db_regional: data/ONEE_Regional_COMPLETE_2007_2023.db
-  db_distributors: data/ONEE_Distributeurs_consumption.db
-  db_cd: null
+  db_path: data/all_data.db
+
 
 # ───────────────────────────────────────────────────────────────────────
 # EVALUATION
@@ -67,7 +66,6 @@ features:
   growth_feature_lags:
     - [1]
   
-  use_monthly_temp_options: [false]
   use_monthly_clients_options: [true, false]
   use_pf_options: [false]
 

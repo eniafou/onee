@@ -36,12 +36,8 @@ exp_name = config.project.exp_name
 # ============================================================================
 data_loader = DataLoader(PROJECT_ROOT)
 
-db_path = config.data.db_regional
-db_cd_path = config.data.db_cd
-
 df_contrats, df_features, _ = data_loader.load_cd_data(
-    db_regional_path=db_path,
-    db_cd_path=db_cd_path,
+    db_path=config.project.project_root / config.data.db_path,
     include_activite_features=False,
 )
 
@@ -126,7 +122,6 @@ if 2 in RUN_LEVELS:
         df_partenaire = df_contrats[df_contrats['partenaire'] == partenaire].copy()
         df_partenaire = df_partenaire.groupby(['annee', 'mois']).agg({
             VARIABLE: 'sum',
-            'temperature': 'mean',
             'puissance facturée': 'sum'
         }).reset_index()
 
@@ -174,7 +169,6 @@ if 3 in RUN_LEVELS:
         df_activite = df_contrats[df_contrats['activite'] == activite].copy()
         df_activite = df_activite.groupby(['annee', 'mois']).agg({
             VARIABLE: 'sum',
-            'temperature': 'mean',
             'puissance facturée': 'sum'
         }).reset_index()
 

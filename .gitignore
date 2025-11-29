@@ -1,6 +1,6 @@
 .venv/
 __pycache__/
-data/
+/data/
 outputs_cd/
 outputs_srm/
 outputs_horizon/
@@ -10,3 +10,4 @@ record/
 *.egg
 artifacts/
 temp.py
+.vscode/

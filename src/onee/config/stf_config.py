@@ -42,9 +42,7 @@ class DataConfig(BaseModel):
     run_levels: List[int]
     
     # Database paths (relative to project_root)
-    db_regional: str = "data/ONEE_Regional_COMPLETE_2007_2023.db"
-    db_distributors: Optional[str] = "data/ONEE_Distributeurs_consumption.db"
-    db_cd: Optional[str] = None
+    db_path: str = "data/all_data.db"
 
 
 # ═══════════════════════════════════════════════════════════════════════

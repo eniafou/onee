@@ -13,15 +13,14 @@ project:
 # DATA
 # ───────────────────────────────────────────────────────────────────────
 data:
-  variable: consommation
-  unit: Mwh
+  variable: consommation_kwh
+  unit: Kwh
   regions: null  # CD operates on contracts, not regions
   run_levels: [1]  # 1: Contrat, 2: Partenaire, 3: Activities
   
   # Database paths
-  db_regional: data/ONEE_Regional_COMPLETE_2007_2023.db
-  db_distributors: null
-  db_cd: data/cd_database_2013_2023.db
+  db_path: data/all_data.db
+
 
 # ───────────────────────────────────────────────────────────────────────
 # EVALUATION
@@ -48,7 +47,6 @@ features:
   growth_feature_lags:
     - [1]
   
-  use_monthly_temp_options: [false]
   use_monthly_clients_options: [false]
   use_pf_options: [true, false]
 

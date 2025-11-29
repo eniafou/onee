@@ -242,7 +242,7 @@ def safe_parse_date(x):
 
     return None  # could not parse
 
-def get_move_in_year(df_c, not_started_yet_th = 20, strict = False):
+def get_move_in_year(df_c, consommation_col = "consommation_kwh", not_started_yet_th = 20, strict = False):
     """
     Extract the first non-null 'Date d'emménagement' value from a DataFrame
     and return its year as an integer, or None if not available.
@@ -266,12 +266,12 @@ def get_move_in_year(df_c, not_started_yet_th = 20, strict = False):
     move_out_year = safe_parse_date(df_c['Date de déménagement'].dropna().iloc[0]).year
     
     max_year = df_c["annee"].max()
-    annual_consumption = df_c[df_c["annee"] == move_in_year]["consommation"].sum()
+    annual_consumption = df_c[df_c["annee"] == move_in_year][consommation_col].sum()
     while annual_consumption <= not_started_yet_th and (move_out_year is None or move_in_year < move_out_year):
         move_in_year+=1
         if move_in_year >= max_year:
             break
-        annual_consumption = df_c[df_c["annee"] == move_in_year]["consommation"].sum()
+        annual_consumption = df_c[df_c["annee"] == move_in_year][consommation_col].sum()
 
     return move_in_year
 

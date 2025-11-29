@@ -19,7 +19,6 @@ config = ShortTermForecastConfig.from_yaml(config_path)
 
 # Convert to legacy ANALYSIS_CONFIG format
 ANALYSIS_CONFIG = config.to_analysis_config()
-print(ANALYSIS_CONFIG)
 
 # Extract commonly used values
 PROJECT_ROOT = config.project.project_root
@@ -43,18 +42,12 @@ if __name__ == "__main__":
     for TARGET_REGION in REGIONS:
         print(f"Loading data for {TARGET_REGION}...\n")
 
-        # DB paths
-        db_regional_path = config.data.db_regional
-        db_dist_path = config.data.db_distributors
-
         # Load data using DataLoader
         df_regional, df_features, df_dist, var_cols = data_loader.load_srm_data(
-            db_regional_path=db_regional_path,
-            db_dist_path=db_dist_path,
+            db_path=config.project.project_root / config.data.db_path,
             variable=VARIABLE,
             target_region=TARGET_REGION,
         )
-        print(df_regional.head())
         reg_var_col = var_cols["regional"]
 
         print(f"\n{'#'*60}")

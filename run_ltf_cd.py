@@ -43,14 +43,10 @@ if __name__ == "__main__":
     
     # Initialize DataLoader
     data_loader = DataLoader(config.project.project_root)
-    
-    db_regional_path = config.project.project_root / config.data.db_regional
-    db_cd_path = config.project.project_root / config.data.db_cd
 
     # Load data using DataLoader
     df_contrats, df_features, df_activite_features = data_loader.load_cd_data(
-        db_regional_path=db_regional_path,
-        db_cd_path=db_cd_path,
+        db_path=config.project.project_root / config.data.db_path,
         include_activite_features=True,
     )
 
@@ -185,7 +181,6 @@ if __name__ == "__main__":
                 df_activite = df_contrats[df_contrats['activite'] == activite].copy()
                 df_activite = df_activite.groupby(['annee', 'mois']).agg({
                     config.data.target_variable: 'sum',
-                    'temperature': 'mean',
                     'puissance facturée': 'sum'
                 }).reset_index()
                 

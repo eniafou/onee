@@ -40,9 +40,7 @@ class DataConfig(BaseModel):
     impute_2020: bool = False
     
     # Database paths (relative to project_root or absolute)
-    db_regional: str = "data/ONEE_Regional_COMPLETE_2007_2023.db"
-    db_distributors: Optional[str] = "data/ONEE_Distributeurs_consumption.db"
-    db_cd: Optional[str] = None  # For CD forecasts
+    db_path: str = "data/all_data.db"
 
 
 # ═══════════════════════════════════════════════════════════════════════

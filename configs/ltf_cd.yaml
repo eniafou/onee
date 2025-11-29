@@ -14,7 +14,7 @@ project:
 # PILLAR 2: DATA
 # ───────────────────────────────────────────────────────────────────────
 data:
-  target_variable: consommation
+  target_variable: consommation_kwh
   unit: Kwh
   impute_2020: false
   
@@ -28,9 +28,7 @@ data:
   run_levels: [3]
   
   # Database paths (relative to project_root)
-  db_regional: data/ONEE_Regional_COMPLETE_2007_2023.db
-  db_distributors: null
-  db_cd: data/cd_database_2013_2023.db
+  db_path: data/all_data.db
 
 # ───────────────────────────────────────────────────────────────────────
 # PILLAR 3: TEMPORAL
