@@ -118,31 +118,29 @@ class GaussianProcessForecastModelConfig(BaseModelConfig):
     model_type: Literal["GaussianProcessForecastModel"] = "GaussianProcessForecastModel"
     
     # GP-specific parameters
+    kernel_key: List[Optional[str]] = Field(
+        default=[None],
+        description="Kernel key from KERNEL_REGISTRY. Options: 'rbf_white', 'matern_white', 'rbf_dot_white', 'matern_smooth', 'rbf_long', or None for default."
+    )
     n_restarts_optimizer: List[int] = Field(default=[10])
     normalize_y: List[bool] = Field(default=[True, False])
     use_log_transform: List[bool] = Field(default=[True])
     alpha: List[float] = Field(default=[1e-10])
     
-    # Prior configuration
-    prior_type: List[str] = Field(
-        default=["PowerGrowthPrior"],
-        description="Type of prior: 'LinearGrowthPrior', 'PowerGrowthPrior', 'FlatPrior'"
-    )
-    prior_power: List[float] = Field(
-        default=[0.5],
-        description="Power parameter for PowerGrowthPrior (0 < p <= 1)"
-    )
-    prior_min_annual_growth: List[float] = Field(
-        default=[0.0],
-        description="Minimum annual growth for LinearGrowthPrior"
-    )
-    prior_anchor_window: List[int] = Field(
-        default=[3],
-        description="Number of recent years to anchor the prior"
-    )
-    prior_force_positive_growth: List[bool] = Field(
+    # Outlier detection
+    remove_outliers: List[bool] = Field(
         default=[False],
-        description="Force positive growth in PowerGrowthPrior"
+        description="Whether to detect and downweight outliers during GP fitting."
+    )
+    outlier_threshold: List[float] = Field(
+        default=[2.5],
+        description="Z-score threshold for outlier detection (using MAD)."
+    )
+    
+    # Prior configuration - list of prior config dicts to try
+    prior_config: List[Dict[str, Any]] = Field(
+        default=[{"type": "PowerGrowthPrior", "power": 0.5, "anchor_window": 3, "min_annual_growth": 0.02}],
+        description="List of prior configurations. Each dict should have 'type' and corresponding params."
     )
 
 
@@ -153,27 +151,31 @@ class IntensityForecastWrapperConfig(BaseModelConfig):
     # Normalization
     normalization_col: List[str] = Field(default=[Aliases.TOTAL_ACTIVE_CONTRATS], description="Column for normalization")
     
-    # Internal model configuration (typically GaussianProcess)
-    internal_model_type: List[str] = Field(
-        default=["GaussianProcessForecastModel"],
-        description="Type of internal model to wrap"
-    )
-    
     # GP parameters for internal model
+    kernel_key: List[Optional[str]] = Field(
+        default=[None],
+        description="Kernel key from KERNEL_REGISTRY. Options: 'rbf_white', 'matern_white', 'rbf_dot_white', 'matern_smooth', 'rbf_long', or None for default."
+    )
     n_restarts_optimizer: List[int] = Field(default=[10])
     normalize_y: List[bool] = Field(default=[True, False])
     use_log_transform: List[bool] = Field(default=[False])
     alpha: List[float] = Field(default=[1e-10])
     
-    # Prior configuration for internal GP model
-    prior_type: List[str] = Field(
-        default=["PowerGrowthPrior"],
-        description="Type of prior for internal model"
+    # Outlier detection
+    remove_outliers: List[bool] = Field(
+        default=[False],
+        description="Whether to detect and downweight outliers during GP fitting."
     )
-    prior_power: List[float] = Field(default=[2.0])
-    prior_min_annual_growth: List[float] = Field(default=[0.0])
-    prior_anchor_window: List[int] = Field(default=[3])
-    prior_force_positive_growth: List[bool] = Field(default=[False])
+    outlier_threshold: List[float] = Field(
+        default=[2.5],
+        description="Z-score threshold for outlier detection (using MAD)."
+    )
+    
+    # Prior configuration for internal GP model - list of prior config dicts
+    prior_config: List[Dict[str, Any]] = Field(
+        default=[{"type": "PowerGrowthPrior", "power": 0.5, "anchor_window": 3, "min_annual_growth": 0.02}],
+        description="List of prior configurations for internal model. Each dict should have 'type' and corresponding params."
+    )
 
 
 # Discriminated Union for Model Configs

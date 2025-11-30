@@ -13,12 +13,44 @@ import inspect
 from onee.utils import add_annual_client_feature, add_yearly_feature
 from onee.data.names import Aliases
 from abc import ABC, abstractmethod
-from sklearn.linear_model import LinearRegression
+from sklearn.linear_model import LinearRegression, RANSACRegressor
 from scipy.interpolate import lagrange, CubicSpline
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import RBF, WhiteKernel, DotProduct, ConstantKernel as C, Matern
 import os
 import re
+
+# ═══════════════════════════════════════════════════════════════════════
+# KERNEL REGISTRY
+# ═══════════════════════════════════════════════════════════════════════
+# Available kernels for GaussianProcessForecastModel
+# Keys can be used in config files to select a kernel
+# Note: These are FACTORY FUNCTIONS that return fresh kernel instances
+# to avoid mutation issues when GP optimizes kernel hyperparameters
+KERNEL_REGISTRY = {
+    "rbf_white": lambda: C(1.0, (1e-2, 1e3)) * RBF(length_scale=3.0, length_scale_bounds=(2.0, 6.0)) + WhiteKernel(noise_level=0.1, noise_level_bounds=(1e-5, 0.5)),
+    "matern_white": lambda: C(1.0, (1e-2, 1e3)) * Matern(length_scale=3.0, length_scale_bounds=(1.0, 10.0), nu=2.5) + WhiteKernel(noise_level=0.1, noise_level_bounds=(1e-5, 0.5)),
+    "rbf_dot_white": lambda: C(1.0, (1e-2, 1e3)) * RBF(length_scale=3.0, length_scale_bounds=(1.0, 10.0)) + DotProduct(sigma_0=1.0) + WhiteKernel(noise_level=0.1, noise_level_bounds=(1e-5, 0.5)),
+    "matern_smooth": lambda: C(1.0, (1e-2, 1e3)) * Matern(length_scale=5.0, length_scale_bounds=(2.0, 15.0), nu=2.5) + WhiteKernel(noise_level=0.05, noise_level_bounds=(1e-6, 0.2)),
+    "rbf_long": lambda: C(1.0, (1e-2, 1e3)) * RBF(length_scale=5.0, length_scale_bounds=(3.0, 10.0)) + WhiteKernel(noise_level=0.1, noise_level_bounds=(1e-5, 0.5)),
+}
+
+def get_kernel(kernel_key: Optional[str]):
+    """
+    Get a NEW kernel instance from the registry by key.
+    Returns None if kernel_key is None (will use default kernel).
+    Raises ValueError if kernel_key is not found.
+    
+    Note: Each call returns a fresh kernel instance to avoid mutation
+    issues when GaussianProcessRegressor optimizes kernel hyperparameters.
+    """
+    if kernel_key is None:
+        return None
+    if kernel_key not in KERNEL_REGISTRY:
+        raise ValueError(f"Unknown kernel_key: '{kernel_key}'. Available: {list(KERNEL_REGISTRY.keys())}")
+    # Call the factory function to get a fresh kernel instance
+    return KERNEL_REGISTRY[kernel_key]()
+
 
 def build_growth_rate_features(
     years: Iterable[int],
@@ -185,13 +217,22 @@ class BaseTrendPrior(ABC):
 # ==========================================
 class LinearGrowthPrior(BaseTrendPrior):
     """
-    Models a Linear Trend with a forced minimum slope (Growth Floor) 
+    Models a Linear Trend with an optional forced minimum slope (Growth Floor) 
     and an anchor to recent data.
     
     Equation: y = m*t + b
-    Where 'm' is at least 'min_annual_growth'.
+    Where 'm' is at least 'min_annual_growth' (if specified).
+    
+    Parameters
+    ----------
+    min_annual_growth : float or None
+        Minimum slope constraint. If None, no constraint is applied and the 
+        natural slope from linear regression is used.
+    anchor_window : int or None
+        Number of recent observations to anchor the intercept to.
+        If None, uses all observations.
     """
-    def __init__(self, min_annual_growth: float = 0.02, anchor_window: int = 3):
+    def __init__(self, min_annual_growth: Optional[float] = 0.02, anchor_window: Optional[int] = 3):
         self.min_annual_growth = min_annual_growth
         self.anchor_window = anchor_window
         
@@ -210,13 +251,20 @@ class LinearGrowthPrior(BaseTrendPrior):
         
         self.original_raw_slope = float(lr.coef_[0])
         
-        # 2. Apply the "Floor"
+        # 2. Apply the "Floor" (only if min_annual_growth is specified)
         # If natural slope is -0.05 but min is 0.01, we force 0.01.
-        self.forced_slope = max(self.original_raw_slope, self.min_annual_growth)
+        if self.min_annual_growth is not None:
+            self.forced_slope = max(self.original_raw_slope, self.min_annual_growth)
+        else:
+            # No constraint - use natural slope
+            self.forced_slope = self.original_raw_slope
         
         # 3. Anchor the Intercept to RECENT data
         # We pivot the new line so it passes through the average of the last N years.
-        valid_window = min(self.anchor_window, len(y_transformed))
+        if self.anchor_window is not None:
+            valid_window = min(self.anchor_window, len(y_transformed))
+        else:
+            valid_window = len(y_transformed)  # Use all data
         
         recent_y_mean = np.mean(y_transformed[-valid_window:])
         recent_x_mean = np.mean(X_years[-valid_window:])
@@ -261,15 +309,22 @@ class PowerGrowthPrior(BaseTrendPrior):
         - 1.0 = Linear (No slowing down)
         - 0.5 = Square Root (Moderate slowing) - RECOMMENDED START
         - 0.1 = Very similar to Logarithmic (Fast slowing)
+    min_annual_growth : float or None
+        Minimum slope constraint. If None, no constraint is applied and the 
+        natural slope from regression is used.
+    anchor_window : int or None
+        Number of recent observations to anchor the intercept to.
+        If None, uses all observations.
     """
-    def __init__(self, power: float = 0.5, anchor_window: int = 3, force_positive_growth: bool = True):
+    def __init__(self, power: float = 0.5, anchor_window: Optional[int] = 3, min_annual_growth: Optional[float] = 0.02):
         self.power = power
         self.anchor_window = anchor_window
-        self.force_positive_growth = force_positive_growth
+        self.min_annual_growth = min_annual_growth
         
         self.slope_a = None
         self.intercept_b = None
         self.start_year_ref = None
+        self.original_raw_slope = None
 
     def _get_relative_time(self, years):
         # t=1, 2, 3...
@@ -286,16 +341,20 @@ class PowerGrowthPrior(BaseTrendPrior):
         lr = LinearRegression()
         lr.fit(X_power, y_transformed)
         
-        raw_slope = float(lr.coef_[0])
+        self.original_raw_slope = float(lr.coef_[0])
         
-        # Enforce Positive Growth
-        if self.force_positive_growth and raw_slope < 0:
-            self.slope_a = 1e-4
+        # Apply the "Floor" (only if min_annual_growth is specified)
+        if self.min_annual_growth is not None:
+            self.slope_a = max(self.original_raw_slope, self.min_annual_growth)
         else:
-            self.slope_a = raw_slope
+            # No constraint - use natural slope
+            self.slope_a = self.original_raw_slope
 
         # Anchor Intercept
-        valid_window = min(self.anchor_window, len(y_transformed))
+        if self.anchor_window is not None:
+            valid_window = min(self.anchor_window, len(y_transformed))
+        else:
+            valid_window = len(y_transformed)  # Use all data
         recent_y_avg = np.mean(y_transformed[-valid_window:])
         recent_x_avg = np.mean(X_power[-valid_window:])
         
@@ -318,10 +377,10 @@ class PowerGrowthPrior(BaseTrendPrior):
 
     def get_params(self) -> Dict:
         return {
-            "type": "PowerGrowthPrior",
             "power": self.power,
             "slope_a": self.slope_a,
-            "intercept_b": self.intercept_b
+            "intercept_b": self.intercept_b,
+            "original_raw_slope": self.original_raw_slope
         }
 
 class FlatPrior(BaseTrendPrior):
@@ -330,17 +389,33 @@ class FlatPrior(BaseTrendPrior):
     It predicts a horizontal line at the mean (or median) of the history.
     
     Equation: y = constant
+    
+    Parameters
+    ----------
+    method : str
+        How to compute the baseline value. Options: 'mean', 'median', 'last_value'
+    anchor_window : int
+        Number of recent observations to use for computing the baseline.
+        If None, uses all observations.
     """
-    def __init__(self, method="mean"):
+    def __init__(self, method="mean", anchor_window: int = None):
         # method can be 'mean', 'median', or 'last_value'
         self.method = method
+        self.anchor_window = anchor_window
         self.baseline_value = None
 
     def fit(self, years: np.ndarray, y_transformed: np.ndarray, X_exog=None):
+        # Apply anchor window if specified
+        if self.anchor_window is not None:
+            valid_window = min(self.anchor_window, len(y_transformed))
+            y_windowed = y_transformed[-valid_window:]
+        else:
+            y_windowed = y_transformed
+        
         if self.method == "mean":
-            self.baseline_value = np.mean(y_transformed)
+            self.baseline_value = np.mean(y_windowed)
         elif self.method == "median":
-            self.baseline_value = np.median(y_transformed)
+            self.baseline_value = np.median(y_windowed)
         elif self.method == "last_value":
             # Very useful for 'Random Walk' assumptions
             self.baseline_value = y_transformed[-1]
@@ -360,6 +435,7 @@ class FlatPrior(BaseTrendPrior):
     def get_params(self) -> Dict:
         return {
             "method": self.method,
+            "anchor_window": self.anchor_window,
             "baseline_value": self.baseline_value
         }
 
@@ -591,41 +667,37 @@ class ParamIntrospectionMixin:
 
 class IntensityForecastWrapper(BaseForecastModel):
     """
-    A Wrapper that converts a standard forecast model into an 'Intensity' model.
+    A Wrapper that converts a GaussianProcessForecastModel into an 'Intensity' model.
     
-    It trains the internal model on (y / normalization_col) and 
+    It trains the internal GP model on (y / normalization_col) and 
     scales the output back up by (normalization_col) during prediction.
     """
     SUPPORTED_HYPERPARAMS = [
         "normalization_col",
-        "internal_model_type",
+        "kernel_key",
         "n_restarts_optimizer",
         "normalize_y",
         "use_log_transform",
         "alpha",
-        "prior_type",
-        "prior_power",
-        "prior_min_annual_growth",
-        "prior_anchor_window",
-        "prior_force_positive_growth"
+        "prior_config",
+        "remove_outliers",
+        "outlier_threshold"
     ]
 
 
     def __init__(self, 
                  normalization_col: str = Aliases.TOTAL_ACTIVE_CONTRATS, 
-                 internal_model: BaseForecastModel = None,
-                 internal_model_type: str = "GaussianProcessForecastModel",
                  # GP parameters
+                 kernel_key: Optional[str] = None,
                  n_restarts_optimizer: int = 10,
                  normalize_y: bool = True,
                  use_log_transform: bool = False,
                  alpha: float = 1e-10,
-                 # Prior parameters
-                 prior_type: str = "PowerGrowthPrior",
-                 prior_power: float = 2.0,
-                 prior_min_annual_growth: float = 0.0,
-                 prior_anchor_window: int = 3,
-                 prior_force_positive_growth: bool = False,
+                 # Prior configuration as dict
+                 prior_config: Optional[Dict] = None,
+                 # Outlier detection
+                 remove_outliers: bool = False,
+                 outlier_threshold: float = 2.5,
                  **kwargs):
         """
         Wrapper that normalizes predictions by a column (e.g., total_active_contrats).
@@ -634,30 +706,38 @@ class IntensityForecastWrapper(BaseForecastModel):
         ----------
         normalization_col : str
             Column name to use for normalization
-        internal_model : BaseForecastModel, optional
-            Pre-configured internal model. If None, creates one based on internal_model_type
-        internal_model_type : str
-            Type of internal model to create if internal_model is None
+        kernel_key : str, optional
+            Key to select a kernel from KERNEL_REGISTRY. If None, uses default kernel.
+        n_restarts_optimizer : int
+            Number of restarts for GP optimizer
+        normalize_y : bool
+            Whether to normalize y in GP
+        use_log_transform : bool
+            Whether to apply log transform
+        alpha : float
+            GP alpha parameter
+        prior_config : dict
+            Dictionary containing prior configuration with 'type' and corresponding parameters.
+        remove_outliers : bool
+            Whether to detect and downweight outliers during GP fitting.
+        outlier_threshold : float
+            Z-score threshold for outlier detection (using MAD).
         """
         self.norm_col = normalization_col
+        # Default prior config if not provided
+        if prior_config is None:
+            prior_config = {"type": "PowerGrowthPrior", "power": 0.5, "anchor_window": 3, "min_annual_growth": 0.0}
         
-        if internal_model is None:
-            if internal_model_type == "GaussianProcessForecastModel":
-                self.model = GaussianProcessForecastModel(
-                    use_log_transform=use_log_transform,
-                    n_restarts_optimizer=n_restarts_optimizer,
-                    normalize_y=normalize_y,
-                    alpha=alpha,
-                    prior_type=prior_type,
-                    prior_power=prior_power,
-                    prior_min_annual_growth=prior_min_annual_growth,
-                    prior_anchor_window=prior_anchor_window,
-                    prior_force_positive_growth=prior_force_positive_growth
-                )
-            else:
-                raise ValueError(f"Unknown internal_model_type: {internal_model_type}")
-        else:
-            self.model = internal_model
+        self.model = GaussianProcessForecastModel(
+            kernel_key=kernel_key,
+            use_log_transform=use_log_transform,
+            n_restarts_optimizer=n_restarts_optimizer,
+            normalize_y=normalize_y,
+            alpha=alpha,
+            prior_config=prior_config,
+            remove_outliers=remove_outliers,
+            outlier_threshold=outlier_threshold
+        )
             
         self.fitted_params = {}
 
@@ -667,9 +747,9 @@ class IntensityForecastWrapper(BaseForecastModel):
         Fits the internal model on Intensity.
         """
         if y is None or normalization_arr is None:
-            normalization_arr = X[:, 0]
-            print(f"IntensityWrapper requires 'y' and 'normalization_arr' (values of {self.norm_col}).")
+            raise ValueError(f"IntensityWrapper requires 'y' and 'normalization_arr' (values of {self.norm_col}).")
         
+        print(normalization_arr)
         self.history_norm_arr = np.array(normalization_arr, dtype=float)
 
         # 1. Calculate Intensity (Avoid division by zero)
@@ -677,13 +757,14 @@ class IntensityForecastWrapper(BaseForecastModel):
         safe_norm[safe_norm == 0] = 1.0
         
         y_intensity = y / safe_norm
+        print(y_intensity)
+        print("###################################################")
         
         # 2. Fit the internal model on Intensity
         self.model.fit(y=y_intensity, years=years, X=X, **kwargs)
         
         # 3. Store params
         self.fitted_params = {
-            "internal_model": self.model.__class__.__name__,
             **self.model.get_params()
         }
         return self
@@ -728,7 +809,8 @@ class IntensityForecastWrapper(BaseForecastModel):
     def get_params(self):
         out = {}
         out["hyper_params"] = {
-            "normalization_col": self.norm_col
+            "normalization_col": self.norm_col,
+            **self.model.hyper_params  # Include all GP hyper params
         }
         out["fitted_params"] = self.fitted_params
         return out
@@ -853,31 +935,27 @@ class IntensityForecastWrapper(BaseForecastModel):
 class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
     
     SUPPORTED_HYPERPARAMS = [
-        "kernel", 
+        "kernel_key", 
         "alpha", 
         "n_restarts_optimizer", 
         "normalize_y", 
-        "random_state",
         "use_log_transform",
-        "prior_type",
-        "prior_power",
-        "prior_min_annual_growth",
-        "prior_anchor_window",
-        "prior_force_positive_growth"
+        "prior_config",
+        "remove_outliers", 
+        "outlier_threshold"
     ]
 
+
     def __init__(self, 
-                 kernel=None, 
+                 kernel_key: Optional[str] = None, 
                  alpha=1e-10, 
                  n_restarts_optimizer=10, 
                  normalize_y=True, 
                  random_state=42, 
                  use_log_transform=True, 
-                 prior_type="PowerGrowthPrior",
-                 prior_power=0.5,
-                 prior_min_annual_growth=0.0,
-                 prior_anchor_window=3,
-                 prior_force_positive_growth=False,
+                 prior_config: Optional[Dict] = None,
+                 remove_outliers: bool = False,
+                 outlier_threshold: float = 2.5,
                  **kwargs
                  ):
         """
@@ -885,62 +963,60 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
         
         Parameters
         ----------
-        kernel : sklearn.kernels.Kernel, optional
-            The kernel specifying the covariance function. 
-            Default: Constant * RBF (smooth) + DotProduct (trend) + White (noise)
+        kernel_key : str, optional
+            Key to select a kernel from KERNEL_REGISTRY. 
+            Available keys: 'rbf_white', 'matern_white', 'rbf_dot_white', 'matern_smooth', 'rbf_long'
+            If None, uses default kernel (rbf_white).
         alpha : float
             Value added to the diagonal of the kernel matrix during fitting.
         n_restarts_optimizer : int
             Number of restarts of the optimizer for finding the kernel's parameters.
         normalize_y : bool
             Whether to normalize the target values y by removing the mean and scaling.
-        prior_type : str
-            Type of prior: 'LinearGrowthPrior', 'PowerGrowthPrior', or 'FlatPrior'
-        prior_power : float
-            Power parameter for PowerGrowthPrior (only used if prior_type='PowerGrowthPrior')
-        prior_min_annual_growth : float
-            Minimum annual growth for LinearGrowthPrior (only used if prior_type='LinearGrowthPrior')
-        prior_anchor_window : int
-            Number of recent years to anchor the prior
-        prior_force_positive_growth : bool
-            Force positive growth (for PowerGrowthPrior)
+        prior_config : dict
+            Dictionary containing prior configuration with 'type' and corresponding parameters.
+            Example: {'type': 'LinearGrowthPrior', 'min_annual_growth': 0.02, 'anchor_window': 3}
+            Supported types: 'LinearGrowthPrior', 'PowerGrowthPrior', 'FlatPrior'
         """
         self._process_init(locals(), GaussianProcessForecastModel)
 
+        # Default prior config if not provided
+        if prior_config is None:
+            prior_config = {"type": "LinearGrowthPrior", "min_annual_growth": 0.02, "anchor_window": 3}
+
         self.hyper_params = {
-            "kernel": kernel,
+            "kernel_key": kernel_key,
             "alpha": alpha,
             "n_restarts_optimizer": n_restarts_optimizer,
             "normalize_y": normalize_y,
-            "random_state": random_state,
             "use_log_transform": use_log_transform,
-            "prior_type": prior_type,
-            "prior_power": prior_power,
-            "prior_min_annual_growth": prior_min_annual_growth,
-            "prior_anchor_window": prior_anchor_window,
-            "prior_force_positive_growth": prior_force_positive_growth,
+            "prior_config": prior_config,
+            "remove_outliers": remove_outliers,
+            "outlier_threshold": outlier_threshold
         }
+        self.random_state = random_state
         
-        # Initialize prior based on configuration
+        # Initialize prior based on configuration dictionary
+        prior_type = prior_config.get("type", "PowerGrowthPrior")
+        
         if prior_type == "LinearGrowthPrior":
             self.prior = LinearGrowthPrior(
-                min_annual_growth=prior_min_annual_growth,
-                anchor_window=prior_anchor_window
+                min_annual_growth=prior_config.get("min_annual_growth", 0.0),
+                anchor_window=prior_config.get("anchor_window", 3)
             )
         elif prior_type == "PowerGrowthPrior":
             self.prior = PowerGrowthPrior(
-                power=prior_power,
-                anchor_window=prior_anchor_window,
-                force_positive_growth=prior_force_positive_growth
+                power=prior_config.get("power", 0.5),
+                anchor_window=prior_config.get("anchor_window", 3),
+                min_annual_growth=prior_config.get("min_annual_growth", 0.02)
             )
         elif prior_type == "FlatPrior":
-            self.prior = FlatPrior(method="mean")
+            self.prior = FlatPrior(
+                method=prior_config.get("method", "mean"),
+                anchor_window=prior_config.get("anchor_window", None)
+            )
         else:
-            raise ValueError(f"Unknown prior_type: {prior_type}. Choose from: LinearGrowthPrior, PowerGrowthPrior, FlatPrior")
-        
-        self.prior_model = None
-        self.prior_slope = None
-        self.prior_intercept = None
+            raise ValueError(f"Unknown prior type: {prior_type}. Choose from: LinearGrowthPrior, PowerGrowthPrior, FlatPrior")
         
         # Internal Model State
         self.model = None
@@ -959,7 +1035,7 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
         # 1. Transform Target Variable (Exponential Logic)
         if self.hyper_params["use_log_transform"]:
             if np.any(y <= 0):
-                raise ValueError("Log transform requires strictly positive y (or non-negative for log1p).")
+                raise ValueError("Log transform requires strictly positive y.")
             y_transformed = np.log(y)
         else:
             y_transformed = y
@@ -971,11 +1047,51 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
         self.prior.fit(years, y_transformed, X)
         
         # Get the trend values for history
-        trend_values = self.prior.predict(years)
+        trend_values = self.prior.predict(years, X)
 
-        # Calculate Residuals (This is what the GP will actually learn)
-        # If the data dipped, residuals will be negative.
+        # Calculate Residuals (Data - Trend)
         residuals = y_transformed - trend_values
+
+        # --- NEW: OUTLIER REJECTION LOGIC ---
+        # If enabled, we calculate dynamic alpha (noise) values.
+        # Points far from the trend get HIGH alpha (model ignores them).
+        
+        base_alpha = self.hyper_params["alpha"]
+        
+        if self.hyper_params["remove_outliers"]:
+            # A. Calculate Robust Z-Scores using MAD (Median Absolute Deviation)
+            # We use MAD because standard 'mean/std' is heavily skewed by the outliers themselves.
+            median_resid = np.median(residuals)
+            abs_diff = np.abs(residuals - median_resid)
+            mad = np.median(abs_diff)
+            
+            if mad == 0:
+                # Perfect fit or constant residuals, no outliers
+                alpha_input = base_alpha
+                self.outliers_detected = []
+            else:
+                # 0.6745 scales MAD to be comparable to Standard Deviation
+                robust_z_scores = 0.6745 * (residuals - median_resid) / mad
+                
+                # B. Identify Outliers
+                threshold = self.hyper_params["outlier_threshold"]
+                outlier_mask = np.abs(robust_z_scores) > threshold
+                
+                # C. Construct Dynamic Alpha Array
+                # Initialize all with base_alpha
+                dynamic_alpha = np.full_like(residuals, base_alpha)
+                
+                # Penalty: If outlier, multiply noise by 10,000 (effectively removing it)
+                dynamic_alpha[outlier_mask] = base_alpha * 10000.0
+                
+                alpha_input = dynamic_alpha
+                self.outliers_detected = years[outlier_mask]
+        else:
+            # Standard behavior: single float applied to all points
+            alpha_input = base_alpha
+            self.outliers_detected = []
+
+        # ------------------------------------
 
         X_years_raw = np.array(years).reshape(-1, 1)
         if X is not None:
@@ -985,27 +1101,27 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
              X_full = X_years_raw
 
         # 2. Unified Scaling
-        # Use a single scaler for the entire matrix to ensure consistency
         self.scaler = StandardScaler()
         X_scaled = self.scaler.fit_transform(X_full)
 
-
         # 3. Kernel Definition
-        # Defaulting to Matern + WhiteKernel to prevent exploding extrapolation
-        if self.hyper_params["kernel"] is None:
+        kernel = get_kernel(self.hyper_params["kernel_key"])
+
+        if kernel is None:
+            # Default kernel: RBF + WhiteKernel
+            # Note: We keep the kernel's own noise level small, 
+            # because 'alpha_input' handles the per-point noise now.
             kernel = (
                 C(1.0, (1e-2, 1e3)) * RBF(length_scale=3.0, length_scale_bounds=(2.0, 6.0)) + 
                 WhiteKernel(noise_level=0.1, noise_level_bounds=(1e-5, 0.5))
             )
-        else:
-            kernel = self.hyper_params["kernel"]
 
         self.model = GaussianProcessRegressor(
             kernel=kernel,
-            alpha=self.hyper_params["alpha"],
+            alpha=alpha_input,  # <--- PASSING THE DYNAMIC ARRAY OR FLOAT
             n_restarts_optimizer=self.hyper_params["n_restarts_optimizer"],
             normalize_y=self.hyper_params["normalize_y"],
-            random_state=self.hyper_params["random_state"]
+            random_state=self.random_state
         )
 
         self.model.fit(X_scaled, residuals)
@@ -1013,10 +1129,12 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
         self.fitted_params = {
             "learned_kernel": str(self.model.kernel_),
             "log_marginal_likelihood": float(self.model.log_marginal_likelihood()),
+            "outliers_removed_count": len(self.outliers_detected),
             **self.prior.get_params()
         }
         
         return self
+
 
     def predict(self, X_next: Optional[np.ndarray] = None, **kwargs) -> float:
         if self.model is None:
@@ -1087,6 +1205,7 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
 
         results = []
         for i, year in enumerate(future_years):
+            print(f"Year: {year}, Trend: {trend_vals[i]}, Residual Mean: {resid_mean[i]}, Residual Std: {resid_std[i]}")
             y_mean = trend_vals[i] + resid_mean[i]
             y_std = resid_std[i] # The trend is deterministic, so uncertainty comes only from GP
             

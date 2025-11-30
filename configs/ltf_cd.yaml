@@ -36,14 +36,14 @@ data:
 temporal:
   horizon: 5
   forecast_runs:
-    - [2007, 2018]
+    - [2015, 2018]
 
 # ───────────────────────────────────────────────────────────────────────
 # PILLAR 4: FEATURES
 # ───────────────────────────────────────────────────────────────────────
 features:
   transforms:
-    - [level]
+    - [level, lchg]
   
   lags:
     - [1, 2]
@@ -67,17 +67,28 @@ models:
       
       # IntensityForecastWrapper-specific
       normalization_col: [total_active_contrats]
-      internal_model_type: [GaussianProcessForecastModel]
       
       # GP parameters for internal model
+      # Kernel options: null (default), 'rbf_white', 'matern_white', 'rbf_dot_white', 'matern_smooth', 'rbf_long'
+      kernel_key: ["rbf_white"]
       n_restarts_optimizer: [10]
       normalize_y: [true, false]
-      use_log_transform: [false]  # Usually false for intensity models
+      use_log_transform: [false]
       alpha: [1e-10]
       
-      # Prior Configuration for internal GP model
-      prior_type: [PowerGrowthPrior]  # Options: LinearGrowthPrior, PowerGrowthPrior, FlatPrior
-      prior_power: [2.0]  # Higher power = closer to linear (less slowing)
-      prior_min_annual_growth: [0.0]
-      prior_anchor_window: [3]
-      prior_force_positive_growth: [false]
+      # Outlier detection
+      remove_outliers: [False]
+      outlier_threshold: [2.5]
+      
+      # Prior Configuration for internal GP model - list of prior configs to try
+      prior_config:
+        # - type: LinearGrowthPrior
+        #   min_annual_growth: 0.0
+        #   anchor_window: 3
+        - type: PowerGrowthPrior
+          power: 1
+          anchor_window: 3
+          min_annual_growth: null
+        # - type: FlatPrior
+        #   method: mean
+        #   anchor_window: 3

@@ -44,10 +44,6 @@ def run_annual_loocv_grid_search(
         k: v for k, v in mg.items() 
         if k in GrowthModelClass.SUPPORTED_HYPERPARAMS
     }
-
-    if GrowthModelClass.__name__ in ["LocalInterpolationForecastModel"]:
-        fg = {"feature_block": [[]], "training_window": [None]}
-
     # -------------------------------------------------------------------------
     # training_window MUST be handled separately
     # -------------------------------------------------------------------------
@@ -140,8 +136,18 @@ def run_annual_loocv_grid_search(
                     # Train model
                     # ---------------------------------------------------------
                     try:
+                        print(model_config_dict)
                         model = GrowthModelClass(**model_config_dict)
-                        model.fit(y = train_annual_sorted, X = train_features_array, years = train_years, monthly_matrix=train_monthly_sorted)
+                        
+                        # Get normalization array if normalization_col is specified
+                        normalization_arr = None
+                        if "normalization_col" in model_config_dict:
+                            norm_col = model_config_dict["normalization_col"]
+                            norm_df = df_features[[Aliases.ANNEE, norm_col]].drop_duplicates()
+                            norm_df = norm_df.set_index(Aliases.ANNEE).loc[train_years_array]
+                            normalization_arr = norm_df[norm_col].values
+                        
+                        model.fit(y = train_annual_sorted, X = train_features_array, years = train_years_array, monthly_matrix=train_monthly_sorted, normalization_arr=normalization_arr)
                     except Exception as e:
                         if verbose:
                             print("Error training model:", e)
@@ -298,7 +304,16 @@ def run_long_horizon_forecast(
         **best_result["model_config"]["hyper_params"]
     )
 
-    growth_model.fit(y = train_annual, X = growth_features, years = train_years, monthly_matrix=monthly_matrix)
+    # Get normalization array if normalization_col is specified in hyper_params
+    normalization_arr = None
+    hyper_params = best_result["model_config"]["hyper_params"]
+    if "normalization_col" in hyper_params:
+        norm_col = hyper_params["normalization_col"]
+        norm_df = df_features[[Aliases.ANNEE, norm_col]].drop_duplicates()
+        norm_df = norm_df.set_index(Aliases.ANNEE).loc[train_years]
+        normalization_arr = norm_df[norm_col].values
+
+    growth_model.fit(y = train_annual, X = growth_features, years = train_years, monthly_matrix=monthly_matrix, normalization_arr=normalization_arr)
 
     # Step 5. Forecast horizon years using best params
     last_year = int(max(years))

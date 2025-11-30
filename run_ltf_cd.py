@@ -71,6 +71,7 @@ if __name__ == "__main__":
             print(f"{'#'*60}")
 
             activites = sorted(df_contrats[Aliases.ACTIVITE].unique())
+            # activites = ["CAPTAGE, TRAITEMENT ET DISTRIBUTION D'EAU"]
 
             established_activites = []
             growth_activites = []

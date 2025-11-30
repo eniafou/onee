@@ -84,14 +84,25 @@ models:
     # ─── Gaussian Process Model ───
     - model_type: GaussianProcessForecastModel
       # GP-specific
+      # Kernel options: null (default), 'rbf_white', 'matern_white', 'rbf_dot_white', 'matern_smooth', 'rbf_long'
+      kernel_key: ["rbf_white"]
       n_restarts_optimizer: [10]
       normalize_y: [true, false]
       use_log_transform: [true]
       alpha: [1e-10]
       
-      # Prior Configuration
-      prior_type: [LinearGrowthPrior]  # Options: LinearGrowthPrior, PowerGrowthPrior, FlatPrior
-      prior_power: [0.5]  # For PowerGrowthPrior: 0.5 = sqrt (moderate slowing), 1.0 = linear
-      prior_min_annual_growth: [0.02]  # For LinearGrowthPrior: minimum growth floor
-      prior_anchor_window: [3]  # Number of recent years to anchor prior
-      prior_force_positive_growth: [false]  # Force positive growth in PowerGrowthPrior
+      # Outlier detection
+      remove_outliers: [False]
+      outlier_threshold: [2.5]
+      
+      # Prior Configuration - list of prior configs to try
+      prior_config:
+        - type: LinearGrowthPrior
+          min_annual_growth: 0.02
+          anchor_window: 3
+        - type: PowerGrowthPrior
+          power: 0.5
+          anchor_window: 3
+          min_annual_growth: 0.02
+        # - type: FlatPrior
+        #   method: mean
