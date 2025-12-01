@@ -239,7 +239,12 @@ class DataLoader:
             {ActiveContratsColumns.JUST_STARTED} as {Aliases.JUST_STARTED},
             {ActiveContratsColumns.TWO_YEARS_OLD} as {Aliases.TWO_YEARS_OLD},
             {ActiveContratsColumns.THREE_YEARS_OLD} as {Aliases.THREE_YEARS_OLD},
-            {ActiveContratsColumns.MORE_THAN_3_YEARS_OLD} as {Aliases.MORE_THAN_3_YEARS_OLD}
+            {ActiveContratsColumns.MORE_THAN_3_YEARS_OLD} as {Aliases.MORE_THAN_3_YEARS_OLD},
+            {ActiveContratsColumns.PUISSANCE_FACTUREE_TOTAL} as {Aliases.PUISSANCE_FACTUREE_TOTAL},
+            {ActiveContratsColumns.PUISSANCE_FACTUREE_JUST_STARTED} as {Aliases.PUISSANCE_FACTUREE_JUST_STARTED},
+            {ActiveContratsColumns.PUISSANCE_FACTUREE_TWO_YEARS_OLD} as {Aliases.PUISSANCE_FACTUREE_TWO_YEARS_OLD},
+            {ActiveContratsColumns.PUISSANCE_FACTUREE_THREE_YEARS_OLD} as {Aliases.PUISSANCE_FACTUREE_THREE_YEARS_OLD},
+            {ActiveContratsColumns.PUISSANCE_FACTUREE_MORE_THAN_3_YEARS_OLD} as {Aliases.PUISSANCE_FACTUREE_MORE_THAN_3_YEARS_OLD}
             FROM {Tables.ACTIVE_CONTRATS_FEATURES}
             """
             df_activite_features = pd.read_sql_query(query_activite_features, db)

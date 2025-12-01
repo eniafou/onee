@@ -243,7 +243,7 @@ def safe_parse_date(x):
 
     return None  # could not parse
 
-def get_move_in_year(df_c, consommation_col = None, not_started_yet_th = 20, strict = False):
+def get_move_in_year(df_c, consommation_col = None, not_started_yet_th = 20):
     if consommation_col is None:
         consommation_col = Aliases.CONSOMMATION_KWH
     """
@@ -252,23 +252,26 @@ def get_move_in_year(df_c, consommation_col = None, not_started_yet_th = 20, str
     """
     if Aliases.DATE_EMMENAGEMENT not in df_c.columns:
         return None
-
-    move_in_val = df_c[Aliases.DATE_EMMENAGEMENT].dropna()
-    if move_in_val.empty:
-        return None
-
-    move_in_date = safe_parse_date(move_in_val.iloc[0])
-    if move_in_date is None:
-        return None
-    
-    move_in_year = move_in_date.year
-
-    if strict:
-        return move_in_year
-
-    move_out_year = safe_parse_date(df_c[Aliases.DATE_DEMENAGEMENT].dropna().iloc[0]).year
     
     max_year = df_c[Aliases.ANNEE].max()
+    min_year = df_c[Aliases.ANNEE].min()
+
+    move_in_val = df_c[Aliases.DATE_EMMENAGEMENT].dropna()
+
+    if move_in_val.empty:
+        move_in_year = min_year
+    else:
+        move_in_date = safe_parse_date(move_in_val.iloc[0])
+    
+        if move_in_date is None:
+            move_in_year = min_year
+        else:
+            move_in_year = move_in_date.year
+
+
+    move_out_year = get_move_out_year(df_c)
+    
+    
     annual_consumption = df_c[df_c[Aliases.ANNEE] == move_in_year][consommation_col].sum()
     while annual_consumption <= not_started_yet_th and (move_out_year is None or move_in_year < move_out_year):
         move_in_year+=1
@@ -279,21 +282,21 @@ def get_move_in_year(df_c, consommation_col = None, not_started_yet_th = 20, str
     return move_in_year
 
 
-def get_move_out_year(df_c):
+def get_move_out_year(df_c, consommation_col = Aliases.DATE_DEMENAGEMENT):
     """
     Extract the last non-null 'Date de déménagement' value from a DataFrame
     and return its year as an integer, or None if not available.
     """
-    if Aliases.DATE_DEMENAGEMENT not in df_c.columns:
+    if consommation_col not in df_c.columns:
         return None
 
-    move_out_vals = df_c[Aliases.DATE_DEMENAGEMENT].dropna()
+    move_out_vals = df_c[consommation_col].dropna()
     if move_out_vals.empty:
-        return None
+        return 9999
 
     move_out_date = safe_parse_date(move_out_vals.iloc[-1])
     if move_out_date is None:
-        return None
+        return 9999
 
     move_out_year = move_out_date.year
 

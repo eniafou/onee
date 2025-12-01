@@ -13,10 +13,11 @@ import inspect
 from onee.utils import add_annual_client_feature, add_yearly_feature
 from onee.data.names import Aliases
 from abc import ABC, abstractmethod
-from sklearn.linear_model import LinearRegression, RANSACRegressor
+from sklearn.linear_model import LinearRegression, TheilSenRegressor
 from scipy.interpolate import lagrange, CubicSpline
 from sklearn.gaussian_process import GaussianProcessRegressor
 from sklearn.gaussian_process.kernels import RBF, WhiteKernel, DotProduct, ConstantKernel as C, Matern
+from sklearn.gaussian_process.kernels import RationalQuadratic
 import os
 import re
 
@@ -28,11 +29,27 @@ import re
 # Note: These are FACTORY FUNCTIONS that return fresh kernel instances
 # to avoid mutation issues when GP optimizes kernel hyperparameters
 KERNEL_REGISTRY = {
-    "rbf_white": lambda: C(1.0, (1e-2, 1e3)) * RBF(length_scale=3.0, length_scale_bounds=(2.0, 6.0)) + WhiteKernel(noise_level=0.1, noise_level_bounds=(1e-5, 0.5)),
-    "matern_white": lambda: C(1.0, (1e-2, 1e3)) * Matern(length_scale=3.0, length_scale_bounds=(1.0, 10.0), nu=2.5) + WhiteKernel(noise_level=0.1, noise_level_bounds=(1e-5, 0.5)),
-    "rbf_dot_white": lambda: C(1.0, (1e-2, 1e3)) * RBF(length_scale=3.0, length_scale_bounds=(1.0, 10.0)) + DotProduct(sigma_0=1.0) + WhiteKernel(noise_level=0.1, noise_level_bounds=(1e-5, 0.5)),
-    "matern_smooth": lambda: C(1.0, (1e-2, 1e3)) * Matern(length_scale=5.0, length_scale_bounds=(2.0, 15.0), nu=2.5) + WhiteKernel(noise_level=0.05, noise_level_bounds=(1e-6, 0.2)),
-    "rbf_long": lambda: C(1.0, (1e-2, 1e3)) * RBF(length_scale=5.0, length_scale_bounds=(3.0, 10.0)) + WhiteKernel(noise_level=0.1, noise_level_bounds=(1e-5, 0.5)),
+    "rbf_white": lambda: C(1.0, (1e-2, 1e3))
+    * RBF(length_scale=3.0, length_scale_bounds=(2.0, 6.0))
+    + WhiteKernel(noise_level=0.1, noise_level_bounds=(1e-5, 0.5)),
+    "matern_white": lambda: C(1.0, (1e-2, 1e3))
+    * Matern(length_scale=3.0, length_scale_bounds=(1.0, 10.0), nu=0.5)
+    + WhiteKernel(noise_level=0.1, noise_level_bounds=(1e-5, 0.5)),
+    "matern_short": lambda: C(1.0)
+    * Matern(length_scale=0.5, length_scale_bounds=(0.1, 1.5), nu=0.5)
+    + WhiteKernel(noise_level=0.1, noise_level_bounds=(1e-5, 0.5)),
+    "rbf_dot_white": lambda: C(1.0, (1e-2, 1e3))
+    * RBF(length_scale=3.0, length_scale_bounds=(1.0, 10.0))
+    + DotProduct(sigma_0=1.0)
+    + WhiteKernel(noise_level=0.1, noise_level_bounds=(1e-5, 0.5)),
+    "matern_smooth": lambda: C(1.0, (1e-2, 1e3))
+    * Matern(length_scale=5.0, length_scale_bounds=(2.0, 15.0), nu=2.5)
+    + WhiteKernel(noise_level=0.05, noise_level_bounds=(1e-6, 0.2)),
+    "rbf_long": lambda: C(1.0, (1e-2, 1e3))
+    * RBF(length_scale=5.0, length_scale_bounds=(3.0, 10.0))
+    + WhiteKernel(noise_level=0.1, noise_level_bounds=(1e-5, 0.5)),
+    "rational_quadratic": lambda: C(1.0) * RationalQuadratic(alpha=0.1, length_scale=1.0, length_scale_bounds=(0.1, 5.0)) + 
+    WhiteKernel(noise_level=0.1)
 }
 
 def get_kernel(kernel_key: Optional[str]):
@@ -440,6 +457,245 @@ class FlatPrior(BaseTrendPrior):
         }
 
 
+class NeutralPrior(BaseTrendPrior):
+    """
+    A completely neutral prior that outputs 0 for all predictions.
+    
+    This leaves everything to the Gaussian Process - the GP will model
+    the entire signal without any deterministic trend component.
+    
+    Use this when you want the GP to have full control over the predictions
+    without any prior assumptions about trend direction or magnitude.
+    
+    Equation: y = 0 (always)
+    """
+    def __init__(self):
+        self._fitted = False
+
+    def fit(self, years: np.ndarray, y_transformed: np.ndarray, X_exog: Optional[np.ndarray] = None):
+        # Nothing to fit - this prior is stateless
+        self._fitted = True
+
+    def predict(self, years: Union[np.ndarray, float, int], X_exog: Optional[np.ndarray] = None) -> Union[np.ndarray, float]:
+        if not self._fitted:
+            raise RuntimeError("NeutralPrior must be fitted before prediction.")
+        
+        # Return 0 for scalar or array of zeros for array input
+        if np.isscalar(years):
+            return 0.0
+        
+        return np.zeros_like(np.asarray(years), dtype=float)
+
+    def get_params(self) -> Dict:
+        return {
+            "description": "No trend prior - GP models entire signal"
+        }
+
+class AugmentedConsensusPrior(PowerGrowthPrior):
+    """
+    A Trend Prior that adjusts its slope based on the Future Trajectory of an exogenous driver.
+    Ensures continuity by pivoting the new trend around the recent historical data (Anchor).
+    
+    Parameters
+    ----------
+    power : float
+        Controls the concavity of the trend (1.0 = linear).
+    anchor_window : int or None
+        Number of recent observations to anchor the intercept to.
+    min_annual_growth : float or None
+        Minimum slope constraint (growth floor).
+    exog_col_idx : int
+        Index of the exogenous column to use for driver trajectory.
+    driver_weight : float
+        Weight for blending historical slope with driver-implied slope (0-1).
+    memory_decay : float
+        Decay factor for weighting historical observations (0 < decay <= 1).
+        Values < 1.0 give more weight to recent observations.
+        Value of 1.0 gives equal weight to all observations (uses TheilSen regression).
+    """
+    def __init__(
+        self, 
+        power: float = 1.0, 
+        anchor_window: Optional[int] = 3, 
+        min_annual_growth: Optional[float] = 0.02,
+        exog_col_idx: int = 0,
+        driver_weight: float = 0.5,
+        memory_decay: float = 0.7,
+        use_dynamic_weights: bool = False,
+    ):
+        super().__init__(power, anchor_window, min_annual_growth)
+        self.exog_col_idx = exog_col_idx
+        self.driver_weight = driver_weight
+        self.memory_decay = memory_decay
+        self.use_dynamic_weights = use_dynamic_weights
+
+        # Learned Params
+        self.slope_hist = None
+        self.r2_score = None
+        self.scale_ratio = None  
+
+        # Anchor Coordinates (The "Launch Pad")
+        self.anchor_x_val = None
+        self.anchor_y_val = None
+        
+    def fit(self, years: np.ndarray, y_transformed: np.ndarray, X_exog: Optional[np.ndarray] = None):
+        self.start_year_ref = np.min(years)
+        t_relative = self._get_relative_time(years)
+        X_power = np.power(t_relative, self.power).reshape(-1, 1)
+        
+        if self.memory_decay < 1.0:
+            # Calculate age of each point (0 for newest, 1 for previous...)
+            ages = np.max(years) - years
+            weights = np.power(self.memory_decay, ages)
+            print(f"Using memory decay weights: {weights}")
+            
+            # Use LinearRegression because it supports sample_weight
+            lr_time = LinearRegression()
+            lr_time.fit(X_power, y_transformed, sample_weight=weights)
+        else:
+            # Use Robust Regression (TheilSen) for equal weights
+            lr_time = LinearRegression(random_state=42)
+            lr_time.fit(X_power, y_transformed)
+
+        self.r2_score = lr_time.score(X_power, y_transformed)
+        self.slope_hist = float(lr_time.coef_[0])
+
+        # 2. Learn Sensitivity (Elasticity)
+        if X_exog is not None:
+            if X_exog.ndim == 1:
+                exog_series = X_exog.reshape(-1, 1)
+            else:
+                exog_series = X_exog[:, self.exog_col_idx].reshape(-1, 1)
+            
+            std_y = np.std(y_transformed)
+            std_exog = np.std(exog_series)
+
+            numerator = std_y if std_y > 1e-9 else np.abs(np.mean(y_transformed))
+            denominator = std_exog if std_exog > 1e-9 else np.abs(np.mean(exog_series))
+            
+            if denominator < 1e-9:
+                self.scale_ratio = 0.0 
+            else:
+                self.scale_ratio = numerator / denominator
+        else:
+            self.scale_ratio = 0.0
+
+        # 3. Store the Anchor Point (The Launch Pad)
+        # We need this to calculate the intercept dynamically in predict()
+        self._store_anchor_point(y_transformed, X_power)
+        
+        # Calculate initial intercept for inspection
+        self.intercept_b = self.anchor_y_val - (self.slope_hist * self.anchor_x_val)
+        self.slope_a = self.slope_hist
+
+    def predict(self, years: Union[np.ndarray, float, int], X_exog: Optional[np.ndarray] = None):
+        if self.slope_hist is None:
+            raise RuntimeError("AugmentedConsensusPrior must be fitted.")
+
+        years_arr = np.array(years) if not np.isscalar(years) else np.array([years])
+        t_relative = self._get_relative_time(years_arr)
+        X_power = np.power(t_relative, self.power)
+
+        current_slope = self.slope_hist
+        
+        # --- DYNAMIC SLOPE CALCULATION ---
+        if X_exog is not None and len(years_arr) > 1:
+            if X_exog.ndim == 1:
+                exog_series = X_exog.reshape(-1, 1)
+            else:
+                exog_series = X_exog[:, self.exog_col_idx].reshape(-1, 1)
+            
+            lr_future = LinearRegression()
+            X_power_reshaped = X_power.reshape(-1, 1)
+            lr_future.fit(X_power_reshaped, exog_series)
+            
+            s_future_exog = float(lr_future.coef_[0])
+            s_pull = s_future_exog * self.scale_ratio
+            current_slope = self._compute_consensus_slope(self.slope_hist, s_pull)
+
+            print(f"Dynamic slope calculation: s_future_exog={s_future_exog}, scale_ratio={self.scale_ratio}, s_pull={s_pull}")
+            print(f"R2 Score: {self.r2_score}")
+            print(f"Historical slope: {self.slope_hist}")
+            print(f"Computed consensus slope: {current_slope}")
+
+        # --- APPLY GROWTH FLOOR ---
+        if self.min_annual_growth is not None:
+            current_slope = max(current_slope, self.min_annual_growth)
+            
+        # --- DYNAMIC INTERCEPT CALCULATION ---
+        # Recalculate 'b' so the new line passes through the stored Anchor Point.
+        # b = y_anchor - (m_new * x_anchor)
+        current_intercept = self.anchor_y_val - (current_slope * self.anchor_x_val)
+
+        # Final Calculation
+        result = (current_slope * X_power) + current_intercept
+
+        if np.isscalar(years):
+            return float(result[0])
+        return result
+
+    def _store_anchor_point(self, y, X_power):
+        """
+        Calculates and stores the average X and Y of the recent window.
+        This point acts as the pivot for any future slope changes.
+        """
+        if self.anchor_window is not None:
+            valid_window = min(self.anchor_window, len(y))
+        else:
+            valid_window = len(y)
+        
+        self.anchor_y_val = np.mean(y[-valid_window:])
+        self.anchor_x_val = np.mean(X_power[-valid_window:])
+
+
+    def _compute_consensus_slope(self, s_hist: float, s_pull: float) -> float:
+        """
+        Combines History and Future Pull.
+        If use_dynamic_weights is True, the weight depends on how linear the history was.
+        """
+        if s_pull == 0.0:
+            if s_hist < 0.0:
+                if abs(s_hist) < 10**8:
+                    return s_hist * 2
+                else:
+                    s_hist = s_hist * 0.8
+            else:
+                if self.r2_score < 0.3:
+                    return -1 * s_hist * 0.2
+            
+        
+        if self.r2_score > 0.6:
+            if s_hist > 0.0 and s_pull > 0.0:
+                s_hist =  s_hist * 1.5
+            if s_hist < 0.0 and s_pull < 0.0:
+                s_hist =  s_hist * 2
+        
+        if s_pull > 0 and s_hist < 0:
+            s_pull = s_pull * 0.5
+
+        if self.use_dynamic_weights:
+            # Here, we treat R2 as the "Trust in History".
+            trust_in_history = np.clip(self.r2_score, 0.05, 0.9) 
+            
+            # driver_weight becomes (1 - trust)
+            dynamic_driver_weight = 1.0 - trust_in_history
+            
+            return (s_hist * (1 - dynamic_driver_weight)) + (s_pull * dynamic_driver_weight)
+        
+        # Fallback to static weight
+        return (s_hist * (1 - self.driver_weight)) + (s_pull * self.driver_weight)
+
+    def get_params(self) -> Dict:
+        return {
+            "slope_hist": self.slope_hist,
+            "scale_ratio": self.scale_ratio,
+            "power": self.power,
+            "driver_weight": self.driver_weight,
+            "memory_decay": self.memory_decay,
+            "anchor_coords": (self.anchor_x_val, self.anchor_y_val)
+        }
+
+
 class BaseForecastModel(ABC):
     """
     Abstract base class for all annual-level forecasting models.
@@ -641,7 +897,6 @@ class BaseForecastModel(ABC):
         raise NotImplementedError
 
 
-
 class ParamIntrospectionMixin:
     """
     Mixin providing:
@@ -727,7 +982,7 @@ class IntensityForecastWrapper(BaseForecastModel):
         # Default prior config if not provided
         if prior_config is None:
             prior_config = {"type": "PowerGrowthPrior", "power": 0.5, "anchor_window": 3, "min_annual_growth": 0.0}
-        
+
         self.model = GaussianProcessForecastModel(
             kernel_key=kernel_key,
             use_log_transform=use_log_transform,
@@ -847,13 +1102,35 @@ class IntensityForecastWrapper(BaseForecastModel):
         save_plot: bool = False,
         save_folder: str = ".",
         df_monthly: Optional[pd.DataFrame] = None,
-        target_col: str = Aliases.CONSOMMATION_KWH
+        target_col: str = Aliases.CONSOMMATION_KWH,
+        X_exog: Optional[np.ndarray] = None,
+        normalization_arr_full: Optional[np.ndarray] = None
     ):
         """
         Visualizes the TOTAL Consumption Forecast.
         
         It reconstructs the historical total consumption by multiplying the 
         internal model's training intensity by the stored normalization array.
+        
+        Parameters
+        ----------
+        forecast_results : List[Tuple[int, float, float, float]]
+            List of (year, mean, lower, upper) tuples from forecast_horizon.
+        title : str, optional
+            Plot title.
+        save_plot : bool
+            Whether to save the plot to disk.
+        save_folder : str
+            Folder to save the plot.
+        df_monthly : pd.DataFrame, optional
+            Monthly data for plotting actuals.
+        target_col : str
+            Column name for the target variable.
+        X_exog : np.ndarray, optional
+            Pre-built exogenous features for the full timeline (history + forecast years).
+        normalization_arr_full : np.ndarray, optional
+            Normalization values for the full timeline (history + forecast years).
+            Used to scale trend from intensity space to total consumption.
         """
         # 1. Reconstruct Historical Total Consumption
         # The internal model stores 'train_y' as Intensity.
@@ -893,6 +1170,40 @@ class IntensityForecastWrapper(BaseForecastModel):
         # 4. Plot Forecast (Total)
         plt.plot(f_years, f_mean, color='blue', linewidth=2, label='Forecast (Mean)', zorder=4)
         plt.fill_between(f_years, f_lower, f_upper, color='blue', alpha=0.15, label='95% Confidence Interval', zorder=1)
+
+        # --- Plot the Underlying Trend (scaled by normalization) ---
+        # IMPORTANT: Predict train and forecast years SEPARATELY to ensure consistent prior behavior
+        # The AugmentedConsensusPrior behaves differently based on input data (dynamic slope calculation)
+        if self.model.prior is not None:
+            history_years_sorted = np.sort(np.unique(history_years))
+            f_years_arr = np.array(f_years)
+            n_history = len(history_years_sorted)
+            n_forecast = len(f_years_arr)
+            
+            # Split X_exog into history and forecast parts if provided
+            X_exog_history = None
+            X_exog_forecast = None
+            if X_exog is not None:
+                X_exog_history = X_exog[:n_history]
+                X_exog_forecast = X_exog[n_history:n_history + n_forecast]
+            
+            # Predict trend for training years (without dynamic slope adjustment)
+            trend_vals_history = self.model.prior.predict(history_years_sorted, X_exog=X_exog_history)
+            
+            # Predict trend for forecast years (with dynamic slope adjustment using future X_exog)
+            trend_vals_forecast = self.model.prior.predict(f_years_arr, X_exog=X_exog_forecast)
+            
+            # Combine results
+            full_timeline_sorted = np.concatenate([history_years_sorted, f_years_arr])
+            trend_vals = np.concatenate([trend_vals_history, trend_vals_forecast])
+            
+            if self.model.hyper_params["use_log_transform"]:
+                trend_vals = np.exp(trend_vals)
+            
+            # Scale trend by normalization factors to get total consumption trend
+            if normalization_arr_full is not None:
+                trend_scaled = trend_vals * normalization_arr_full
+                plt.plot(full_timeline_sorted, trend_scaled, color='gray', linestyle='--', alpha=0.5, label='Underlying Trend')
 
         # 5. Plot Actuals
         ground_truth_map = {}
@@ -976,7 +1287,12 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
         prior_config : dict
             Dictionary containing prior configuration with 'type' and corresponding parameters.
             Example: {'type': 'LinearGrowthPrior', 'min_annual_growth': 0.02, 'anchor_window': 3}
-            Supported types: 'LinearGrowthPrior', 'PowerGrowthPrior', 'FlatPrior'
+            Supported types: 
+                - 'LinearGrowthPrior': Linear trend with optional growth floor
+                - 'PowerGrowthPrior': Power function trend (concave growth)
+                - 'FlatPrior': Horizontal line at mean/median
+                - 'NeutralPrior': Zero output, GP models entire signal
+                - 'AugmentedConsensusPrior': Adjusts slope based on exogenous driver trajectory
         """
         self._process_init(locals(), GaussianProcessForecastModel)
 
@@ -1015,8 +1331,20 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
                 method=prior_config.get("method", "mean"),
                 anchor_window=prior_config.get("anchor_window", None)
             )
+        elif prior_type == "NeutralPrior":
+            self.prior = NeutralPrior()
+        elif prior_type == "AugmentedConsensusPrior":
+            self.prior = AugmentedConsensusPrior(
+                power=prior_config.get("power", 1.0),
+                anchor_window=prior_config.get("anchor_window", 3),
+                min_annual_growth=prior_config.get("min_annual_growth", 0.02),
+                exog_col_idx=prior_config.get("exog_col_idx", 0),
+                driver_weight=prior_config.get("driver_weight", 0.5),
+                memory_decay=prior_config.get("memory_decay", 0.7),
+                use_dynamic_weights=prior_config.get("use_dynamic_weights", True)
+            )
         else:
-            raise ValueError(f"Unknown prior type: {prior_type}. Choose from: LinearGrowthPrior, PowerGrowthPrior, FlatPrior")
+            raise ValueError(f"Unknown prior type: {prior_type}. Choose from: LinearGrowthPrior, PowerGrowthPrior, FlatPrior, NeutralPrior, AugmentedConsensusPrior")
         
         # Internal Model State
         self.model = None
@@ -1106,6 +1434,8 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
 
         # 3. Kernel Definition
         kernel = get_kernel(self.hyper_params["kernel_key"])
+        print("lllllllllllllllllllllllllllll")
+        print(kernel)
 
         if kernel is None:
             # Default kernel: RBF + WhiteKernel
@@ -1144,7 +1474,7 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
         year_val = X_next[0, 0] # Assume 1st col is Year
         
         # 1. Predict Trend
-        trend_val = self.prior.predict(year_val)
+        trend_val = self.prior.predict(year_val, X_next)
 
         X_scaled = self.scaler.transform(X_next)
         resid_val = self.model.predict(X_scaled)[0]
@@ -1201,7 +1531,7 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
         # 4. Predict
         resid_mean, resid_std = self.model.predict(X_scaled, return_std=True)
         
-        trend_vals = self.prior.predict(future_years)
+        trend_vals = self.prior.predict(future_years, X_exog)
 
         results = []
         for i, year in enumerate(future_years):
@@ -1241,10 +1571,29 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
         save_plot: bool = False,
         save_folder: str = ".",
         df_monthly: Optional[pd.DataFrame] = None,
-        target_col: str = Aliases.CONSOMMATION_KWH
+        target_col: str = Aliases.CONSOMMATION_KWH,
+        X_exog: Optional[np.ndarray] = None
     ):
         """
         Visualizes the forecast, confidence intervals, actuals, AND the underlying Growth Trend.
+        
+        Parameters
+        ----------
+        forecast_results : List[Tuple[int, float, float, float]]
+            List of (year, mean, lower, upper) tuples from forecast_horizon.
+        title : str, optional
+            Plot title.
+        save_plot : bool
+            Whether to save the plot to disk.
+        save_folder : str
+            Folder to save the plot.
+        df_monthly : pd.DataFrame, optional
+            Monthly data for plotting actuals.
+        target_col : str
+            Column name for the target variable.
+        X_exog : np.ndarray, optional
+            Pre-built exogenous features for the full timeline (history + forecast years).
+            Should be aligned with the concatenation of train_years and forecast years.
         """
         # Unpack Forecast
         f_years = [x[0] for x in forecast_results]
@@ -1263,14 +1612,32 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
         # 3. Plot Confidence Intervals
         plt.fill_between(f_years, f_lower, f_upper, color='blue', alpha=0.15, label='95% Confidence Interval', zorder=1)
 
-        # --- NEW: Plot the "Growth Floor" (The Forced Trend) ---
+        # --- Plot the "Growth Floor" (The Forced Trend) ---
         # This helps you see if the model is respecting your min_annual_growth
+        # IMPORTANT: Predict train and forecast years SEPARATELY to ensure consistent prior behavior
+        # The AugmentedConsensusPrior behaves differently based on input data (dynamic slope calculation)
         if self.prior is not None:
-            full_timeline = np.concatenate([self.train_years, f_years])
-            full_timeline_sorted = np.sort(np.unique(full_timeline))
+            train_years_sorted = np.sort(np.unique(self.train_years))
+            f_years_arr = np.array(f_years)
+            n_train = len(train_years_sorted)
+            n_forecast = len(f_years_arr)
             
-            # Ask the strategy object for the line
-            trend_vals = self.prior.predict(full_timeline_sorted)
+            # Split X_exog into history and forecast parts if provided
+            X_exog_history = None
+            X_exog_forecast = None
+            if X_exog is not None:
+                X_exog_history = X_exog[:n_train]
+                X_exog_forecast = X_exog[n_train:n_train + n_forecast]
+            
+            # Predict trend for training years (without dynamic slope adjustment)
+            trend_vals_history = self.prior.predict(train_years_sorted, X_exog=X_exog_history)
+            
+            # Predict trend for forecast years (with dynamic slope adjustment using future X_exog)
+            trend_vals_forecast = self.prior.predict(f_years_arr, X_exog=X_exog_forecast)
+            
+            # Combine results
+            full_timeline_sorted = np.concatenate([train_years_sorted, f_years_arr])
+            trend_vals = np.concatenate([trend_vals_history, trend_vals_forecast])
             
             if self.hyper_params["use_log_transform"]:
                 trend_vals = np.exp(trend_vals)
@@ -1318,8 +1685,6 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
             print(f"Plot saved to: {file_path}")
 
         plt.show()
-
-
 
 
 class MeanRevertingGrowthModel(ParamIntrospectionMixin):

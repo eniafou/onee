@@ -100,9 +100,10 @@ models:
         - type: LinearGrowthPrior
           min_annual_growth: 0.02
           anchor_window: 3
-        - type: PowerGrowthPrior
-          power: 0.5
-          anchor_window: 3
-          min_annual_growth: 0.02
+        # - type: PowerGrowthPrior
+        #   power: 0.5
+        #   anchor_window: 3
+        #   min_annual_growth: 0.02
         # - type: FlatPrior
         #   method: mean
+        # - type: NeutralPrior

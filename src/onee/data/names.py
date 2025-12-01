@@ -81,6 +81,16 @@ class ActiveContratsColumns:
     TWO_YEARS_OLD = "two_years_old"
     THREE_YEARS_OLD = "three_years_old"
     MORE_THAN_3_YEARS_OLD = "more_than_3_years_old"
+    PUISSANCE_FACTUREE_TOTAL = "puissance_facturee_total"
+    PUISSANCE_FACTUREE_JUST_STARTED = "puissance_facturee_just_started"
+    PUISSANCE_FACTUREE_TWO_YEARS_OLD = "puissance_facturee_two_years_old"
+    PUISSANCE_FACTUREE_THREE_YEARS_OLD = "puissance_facturee_three_years_old"
+    PUISSANCE_FACTUREE_MORE_THAN_3_YEARS_OLD = "puissance_facturee_more_than_3_years_old"
+    PUISSANCE_APPELEE_TOTAL = "puissance_appelee_total"
+    PUISSANCE_APPELEE_JUST_STARTED = "puissance_appelee_just_started"
+    PUISSANCE_APPELEE_TWO_YEARS_OLD = "puissance_appelee_two_years_old"
+    PUISSANCE_APPELEE_THREE_YEARS_OLD = "puissance_appelee_three_years_old"
+    PUISSANCE_APPELEE_MORE_THAN_3_YEARS_OLD = "puissance_appelee_more_than_3_years_old"
 
 
 # ============================================================================
@@ -121,6 +131,16 @@ class Aliases:
     TWO_YEARS_OLD = "two_years_old"
     THREE_YEARS_OLD = "three_years_old"
     MORE_THAN_3_YEARS_OLD = "more_than_3_years_old"
+    PUISSANCE_FACTUREE_TOTAL = "puissance_facturee_total"
+    PUISSANCE_FACTUREE_JUST_STARTED = "puissance_facturee_just_started"
+    PUISSANCE_FACTUREE_TWO_YEARS_OLD = "puissance_facturee_two_years_old"
+    PUISSANCE_FACTUREE_THREE_YEARS_OLD = "puissance_facturee_three_years_old"
+    PUISSANCE_FACTUREE_MORE_THAN_3_YEARS_OLD = "puissance_facturee_more_than_3_years_old"
+    PUISSANCE_APPELEE_TOTAL = "puissance_appelee_total"
+    PUISSANCE_APPELEE_JUST_STARTED = "puissance_appelee_just_started"
+    PUISSANCE_APPELEE_TWO_YEARS_OLD = "puissance_appelee_two_years_old"
+    PUISSANCE_APPELEE_THREE_YEARS_OLD = "puissance_appelee_three_years_old"
+    PUISSANCE_APPELEE_MORE_THAN_3_YEARS_OLD = "puissance_appelee_more_than_3_years_old"
 
 
 # ============================================================================

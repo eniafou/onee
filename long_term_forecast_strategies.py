@@ -136,7 +136,6 @@ def run_annual_loocv_grid_search(
                     # Train model
                     # ---------------------------------------------------------
                     try:
-                        print(model_config_dict)
                         model = GrowthModelClass(**model_config_dict)
                         
                         # Get normalization array if normalization_col is specified
@@ -300,6 +299,9 @@ def run_long_horizon_forecast(
     )
     BestModelClass = best_result["model_class"]
 
+    print("fitted params:")
+    print(best_result["model_config"]["fitted_params"])
+
     growth_model = BestModelClass(
         **best_result["model_config"]["hyper_params"]
     )
@@ -353,11 +355,38 @@ def run_long_horizon_forecast(
     future_monthly = [val * mean_curve_norm for _, val in processed_horizon_preds]
 
     if confidence_intervals:
-        growth_model.plot_forecast(horizon_preds, 
+        # Build exogenous features for full timeline (history + forecast) for trend visualization
+        forecast_years = [year for year, _ in processed_horizon_preds]
+        full_timeline = np.concatenate([train_years, forecast_years])
+        full_timeline_sorted = np.sort(np.unique(full_timeline))
+        
+        X_exog_full = build_growth_rate_features(
+            years=full_timeline_sorted,
+            df_features=df_features,
+            clients_lookup=monthly_clients_lookup,
+            df_monthly=df_monthly,
+            **best_result["feature_config"],
+        )
+        
+        # Build normalization array for full timeline if using IntensityForecastWrapper
+        normalization_arr_full = None
+        if "normalization_col" in hyper_params:
+            norm_col = hyper_params["normalization_col"]
+            norm_df = df_features[[Aliases.ANNEE, norm_col]].drop_duplicates()
+            norm_df = norm_df.set_index(Aliases.ANNEE)
+            normalization_arr_full = np.array([
+                norm_df.loc[yr, norm_col] if yr in norm_df.index else np.nan
+                for yr in full_timeline_sorted
+            ])
+        
+        growth_model.plot_forecast(
+            horizon_preds, 
             title=region_entity,
             save_plot=True,
             save_folder=save_folder,
-            df_monthly=df_monthly
+            df_monthly=df_monthly,
+            X_exog=X_exog_full,
+            normalization_arr_full=normalization_arr_full
         )
 
     return {

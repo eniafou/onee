@@ -7,7 +7,7 @@
 # ───────────────────────────────────────────────────────────────────────
 project:
   project_root: .  # Will be resolved to absolute path
-  exp_name: gp_1
+  exp_name: gp_2
   output_base_dir: outputs_horizon_cd
 
 # ───────────────────────────────────────────────────────────────────────
@@ -36,20 +36,21 @@ data:
 temporal:
   horizon: 5
   forecast_runs:
-    - [2015, 2018]
+    - [2013, 2018]
 
 # ───────────────────────────────────────────────────────────────────────
 # PILLAR 4: FEATURES
 # ───────────────────────────────────────────────────────────────────────
 features:
   transforms:
-    - [level, lchg]
+    - [level]
+    - [level, lag]
   
   lags:
     - [1, 2]
   
   feature_block:
-    - [total_active_contrats, just_started, two_years_old, three_years_old, more_than_3_years_old, pib_mdh]
+    - [total_active_contrats, just_started, two_years_old, three_years_old, more_than_3_years_old, puissance_facturee_total, puissance_facturee_just_started, puissance_facturee_two_years_old, puissance_facturee_three_years_old, puissance_facturee_more_than_3_years_old, pib_mdh]
   
   use_pf: [true]
   use_clients: [false]
@@ -85,10 +86,19 @@ models:
         # - type: LinearGrowthPrior
         #   min_annual_growth: 0.0
         #   anchor_window: 3
-        - type: PowerGrowthPrior
-          power: 1
+        # - type: PowerGrowthPrior
+        #   power: 2
+        #   anchor_window: 3
+        #   min_annual_growth: null
+        # - type: FlatPrior
+        #   method: last_value
+        #   anchor_window: 3
+        # - type: NeutralPrior
+        - type: AugmentedConsensusPrior
+          power: 0.5               # 1.0 = Linear, 0.5 = Square root
           anchor_window: 3
           min_annual_growth: null
-        # - type: FlatPrior
-        #   method: mean
-        #   anchor_window: 3
+          exog_col_idx: 0          # Index of driver column in X_exog
+          driver_weight: 0.5       # 0.0 = Pure History, 1.0 = Pure Driver
+          memory_decay: 0.5
+          use_dynamic_weights: true
