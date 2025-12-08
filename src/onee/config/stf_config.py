@@ -4,7 +4,7 @@ Organized by functional groups for clarity
 """
 
 from pathlib import Path
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Union
 from pydantic import BaseModel, Field, field_validator
 import yaml
 from onee.data.names import Aliases
@@ -36,11 +36,7 @@ class DataConfig(BaseModel):
     variable: str = Aliases.CONSOMMATION_KWH
     unit: str = "Kwh"
     
-    # For SRM: list of regions; for CD: None
-    regions: Optional[List[str]] = None
-    
-    # Run levels determine which analysis parts to execute
-    run_levels: List[int]
+    regions: Optional[Union[Dict[str, int], List[str]]] = None
     
     # Database paths (relative to project_root)
     db_path: str = "data/all_data.db"

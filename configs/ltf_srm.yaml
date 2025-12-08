@@ -39,7 +39,7 @@ data:
   # 5: Individual Distributors
   # 6: All Distributors
   # 7: SRM (Regional + Distributors)
-  run_levels: [4, 6, 7]
+  run_levels: [7]
   
   # Database paths (relative to project_root)
   db_path: data/all_data.db

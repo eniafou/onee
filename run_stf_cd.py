@@ -37,9 +37,8 @@ exp_name = config.project.exp_name
 # ============================================================================
 data_loader = DataLoader(PROJECT_ROOT)
 
-df_contrats, df_features, _ = data_loader.load_cd_data(
+df_contrats, df_features = data_loader.load_cd_data(
     db_path=config.project.project_root / config.data.db_path,
-    include_activite_features=False,
 )
 
 # ============================================================================
@@ -96,8 +95,6 @@ if 1 in RUN_LEVELS:
         )
         if result:
             all_results_established.append(result)
-    # all_results_established = joblib.load(PROJECT_ROOT / "outputs_cd/all_results_contrat_s4_overestimation.pkl")
-    # all_results_established = filter_established_entities(all_results_established, growth_contracts, similarity_contracts)
 
     all_results_growth = []
     for contrat in growth_contracts:
@@ -153,11 +150,11 @@ if 3 in RUN_LEVELS:
         df_activite = df_contrats[df_contrats[Aliases.ACTIVITE] == activite].copy()
         move_in_year = get_move_in_year(df_activite)
 
-        if move_in_year is None or move_in_year <= 2021:
+        if move_in_year is None or move_in_year <= ANALYSIS_CONFIG["eval_years_end"] - 2:
             established_activites.append(activite)
-        elif move_in_year == 2022:
+        elif move_in_year == ANALYSIS_CONFIG["eval_years_end"] - 1:
             growth_activites.append(activite)
-        elif move_in_year == 2023:
+        elif move_in_year == ANALYSIS_CONFIG["eval_years_end"]:
             similarity_activites.append(activite)
 
     print(f"\n🟢 Established activites: {len(established_activites)}")
@@ -183,10 +180,6 @@ if 3 in RUN_LEVELS:
         )
         if result:
             all_results_established_activite.append(result)
-
-    # all_results_established_activite = joblib.load(PROJECT_ROOT / "outputs_cd/all_results_activite_overestimation.pkl")
-    # all_results_established_activite = filter_established_entities(all_results_established_activite, growth_activites, similarity_activites, "activite")
-
 
     # --- Process growth activities ---
     all_results_growth_activite = []

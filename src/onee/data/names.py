@@ -56,6 +56,7 @@ class ExogenousColumns:
 
 class CDColumns:
     """Column names for CD table."""
+    REGION = "Region"
     PARTENAIRE = "Partenaire"
     NUMERO_DE_CONTRAT = "Numero_de_contrat"
     YEAR = "year"
@@ -108,12 +109,13 @@ class Aliases:
     DISTRIBUTEUR = "distributeur"
     PARTENAIRE = "partenaire"
     CONTRAT = "contrat"
+    REGION = "region"
     
     # Metrics
     NBR_CLIENTS = "nbr_clients"
     CONSOMMATION_KWH = "consommation_kwh"
-    PUISSANCE_FACTUREE = "puissance facturée"
-    PUISSANCE_APPELEE = "puissance appelée"
+    PUISSANCE_FACTUREE = "puissance_facturee"
+    PUISSANCE_APPELEE = "puissance_appelee"
     
     # Economic indicators
     PIB_MDH = "pib_mdh"
@@ -122,8 +124,8 @@ class Aliases:
     GDP_TERTIAIRE = "gdp_tertiaire"
     
     # Date fields
-    DATE_EMMENAGEMENT = "Date_emmenagement"
-    DATE_DEMENAGEMENT = "Date_demenagement"
+    DATE_EMMENAGEMENT = "date_emmenagement"
+    DATE_DEMENAGEMENT = "date_demenagement"
     
     # Activity features
     TOTAL_ACTIVE_CONTRATS = "total_active_contrats"

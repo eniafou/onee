@@ -7,7 +7,7 @@
 # ───────────────────────────────────────────────────────────────────────
 project:
   project_root: .  # Will be resolved to absolute path
-  exp_name: gp_3
+  exp_name: exp
   output_base_dir: outputs_horizon_cd
 
 # ───────────────────────────────────────────────────────────────────────
@@ -22,10 +22,9 @@ data:
   regions: null
   
   # Run levels for CD:
-  # 1: Individual Contracts
-  # 2: Partenaire (clients)
-  # 3: Activities
-  run_levels: [3]
+  # 1: Regions
+  # 2: Activities
+  run_levels: [1]
   
   # Database paths (relative to project_root)
   db_path: data/all_data.db

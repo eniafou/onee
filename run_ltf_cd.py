@@ -46,9 +46,8 @@ if __name__ == "__main__":
     data_loader = DataLoader(config.project.project_root)
 
     # Load data using DataLoader
-    df_contrats, df_features, df_activite_features = data_loader.load_cd_data(
+    df_contrats, df_features = data_loader.load_cd_data(
         db_path=config.project.project_root / config.data.db_path,
-        include_activite_features=True,
     )
 
     all_results = []
@@ -65,37 +64,86 @@ if __name__ == "__main__":
         )
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        if 3 in RUN_LEVELS:
+        if 1 in RUN_LEVELS:
+            print(f"\n{'#'*60}")
+            print(f"LEVEL 1: REGION")
+            print(f"{'#'*60}")
+
+            regions = sorted(df_contrats[Aliases.REGION].unique())
+
+            # --- Process regions ---
+            for region in regions:
+                df_region = df_contrats[df_contrats[Aliases.REGION] == region].copy()
+                df_region = df_region.groupby([Aliases.ANNEE, Aliases.MOIS]).agg({
+                    config.data.target_variable: 'sum',
+                    Aliases.PUISSANCE_FACTUREE: 'sum'
+                }).reset_index()
+                
+                df_train = df_region[
+                    (df_region[Aliases.ANNEE] >= train_start) & (df_region[Aliases.ANNEE] <= train_end)
+                ]
+                monthly_matrix = create_monthly_matrix(
+                    df_train, value_col=config.data.target_variable
+                )
+                years = np.sort(df_train[Aliases.ANNEE].unique())
+
+                df_activite_features = data_loader.compute_contract_features(df_contrats, entity_col=Aliases.REGION, end_year=train_end + config.temporal.horizon)
+                df_r = df_activite_features[df_activite_features[Aliases.REGION] == region]
+                df_r = df_r.merge(df_features, on=Aliases.ANNEE)
+                 
+                res = run_long_horizon_forecast(
+                    monthly_matrix=monthly_matrix,
+                    years=years,
+                    df_features=df_r,
+                    df_monthly=df_region,
+                    config=config,
+                    MODEL_REGISTRY=MODEL_REGISTRY,
+                    region_entity=f"CD - région {region}",
+                    save_folder=output_dir / f"region_{region}",
+                )
+                
+                forecast_years = [y for y, _ in res["horizon_predictions"]]
+                pred_annual = [float(v) for _, v in res["horizon_predictions"]]
+                actuals = []
+                percent_errors = []
+                for y, v in zip(forecast_years, pred_annual):
+                    actual = None
+                    percent_error = None
+                    mask = df_region[Aliases.ANNEE] == y
+                    if not df_region.loc[mask, config.data.target_variable].empty:
+                        actual = df_region.loc[mask, config.data.target_variable].sum()
+                        percent_error = (
+                            (v - actual) / actual * 100 if actual != 0 else None
+                        )
+
+                    actuals.append(actual)
+                    percent_errors.append(percent_error)
+
+                all_results.append(
+                    {
+                        "train_start": train_start,
+                        "train_end": train_end,
+                        "level": f"Région_{region}",
+                        "forecast_years": forecast_years,
+                        "pred_annual": pred_annual,
+                        "pred_monthly": res["monthly_forecasts"],
+                        "run_parameters": res.get("run_parameters", {}),
+                        "actuals": actuals,
+                        "percent_errors": percent_errors,
+                    }
+                )
+
+        if 2 in RUN_LEVELS:
             print(f"\n{'#'*60}")
             print(f"LEVEL 3: ACTIVITE")
             print(f"{'#'*60}")
 
             activites = sorted(df_contrats[Aliases.ACTIVITE].unique())
-            # activites = ["CAPTAGE, TRAITEMENT ET DISTRIBUTION D'EAU"]
 
-            established_activites = []
-            growth_activites = []
-            similarity_activites = []
 
-            # --- Categorize activities ---
-            for activite in activites:
-                df_activite = df_contrats[df_contrats[Aliases.ACTIVITE] == activite].copy()
-                move_in_year = get_move_in_year(df_activite)
-
-                if move_in_year is None or move_in_year <= 2021:
-                    established_activites.append(activite)
-                elif move_in_year == 2022:
-                    growth_activites.append(activite)
-                elif move_in_year == 2023:
-                    similarity_activites.append(activite)
-
-            print(f"\n🟢 Established activites: {len(established_activites)}")
-            print(f"🚀 Growth activites: {len(growth_activites)}")
-            print(f"🔗 Similarity activites: {len(similarity_activites)}")
 
             # --- Process established activities ---
-            all_results_established_activite = []
-            for activite in established_activites:
+            for activite in activites:
                 df_activite = df_contrats[df_contrats[Aliases.ACTIVITE] == activite].copy()
                 df_activite = df_activite.groupby([Aliases.ANNEE, Aliases.MOIS]).agg({
                     config.data.target_variable: 'sum',
@@ -110,6 +158,7 @@ if __name__ == "__main__":
                 )
                 years = np.sort(df_train[Aliases.ANNEE].unique())
 
+                df_activite_features = data_loader.compute_contract_features(df_contrats, entity_col=Aliases.ACTIVITE, end_year=train_end + config.temporal.horizon)
                 df_a = df_activite_features[df_activite_features[Aliases.ACTIVITE] == activite]
                 df_a = df_a.merge(df_features, on=Aliases.ANNEE)
  
@@ -141,7 +190,7 @@ if __name__ == "__main__":
                     actuals.append(actual)
                     percent_errors.append(percent_error)
 
-                all_results_established_activite.append(
+                all_results.append(
                     {
                         "train_start": train_start,
                         "train_end": train_end,
@@ -155,14 +204,7 @@ if __name__ == "__main__":
                     }
                 )
 
-        
-
-            # --- Merge all ---
-            all_results_activite = (
-                all_results_established_activite
-            )
-
-            all_results += all_results_activite
+    
 
     # ────────────────────────────────────────────────────────────────
     # OUTPUTS

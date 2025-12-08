@@ -13,7 +13,6 @@ from onee.data.names import Aliases, GRDValues
 
 import numpy as np
 import pandas as pd
-import sqlite3
 import pickle
 from pathlib import Path
 import warnings

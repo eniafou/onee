@@ -15,27 +15,20 @@ project:
 data:
   variable: consommation_kwh
   unit: Kwh
+  # regions dict: key=region_name, value=run_level_mode
+  # 0: Total SRM only
+  # 1: Both Individual Activities and Total SRM (level 7)
   regions:
-    - Casablanca-Settat
-    - Béni Mellal-Khénifra
-    - Drâa-Tafilalet
-    - Fès-Meknès
-    - Laâyoune-Sakia El Hamra
-    - Marrakech-Safi
-    - Oriental
-    - Rabat-Salé-Kénitra
-    - Tanger-Tétouan-Al Hoceïma
-    - Souss-Massa
-
-  # Run levels:
-  # 1: Individual Activities
-  # 2: Aggregated BT
-  # 3: Aggregated MT
-  # 4: Total Regional
-  # 5: Individual Distributors
-  # 6: All Distributors
-  # 7: SRM (Regional + Distributors)
-  run_levels: [1, 4]
+    Casablanca-Settat: 0
+    Béni Mellal-Khénifra: 0
+    Drâa-Tafilalet: 0
+    Fès-Meknès: 0
+    Laâyoune-Sakia El Hamra: 0
+    Marrakech-Safi: 0
+    Oriental: 0
+    Rabat-Salé-Kénitra: 0
+    Tanger-Tétouan-Al Hoceïma: 0
+    Souss-Massa: 0
   
   # Database paths
   db_path: data/all_data.db

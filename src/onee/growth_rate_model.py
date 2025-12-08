@@ -100,6 +100,7 @@ def build_growth_rate_features(
         raise ValueError(f"df_features must contain an '{Aliases.ANNEE}' column.")
 
     cols = [Aliases.ANNEE] + feature_cols if feature_cols else [Aliases.ANNEE]
+    
     df = (
         df[cols]
         .drop_duplicates(subset=[Aliases.ANNEE])
