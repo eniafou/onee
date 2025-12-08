@@ -7,7 +7,7 @@
 # ───────────────────────────────────────────────────────────────────────
 project:
   project_root: .  # Will be resolved to absolute path
-  exp_name: gp_2
+  exp_name: gp_3
   output_base_dir: outputs_horizon_cd
 
 # ───────────────────────────────────────────────────────────────────────
@@ -50,7 +50,7 @@ features:
     - [1, 2]
   
   feature_block:
-    - [total_active_contrats, just_started, two_years_old, three_years_old, more_than_3_years_old, puissance_facturee_total, puissance_facturee_just_started, puissance_facturee_two_years_old, puissance_facturee_three_years_old, puissance_facturee_more_than_3_years_old, pib_mdh]
+    - [total_active_contrats, puissance_facturee_total, just_started, two_years_old, three_years_old, more_than_3_years_old, pib_mdh]
   
   use_pf: [true]
   use_clients: [false]
@@ -71,7 +71,7 @@ models:
       
       # GP parameters for internal model
       # Kernel options: null (default), 'rbf_white', 'matern_white', 'rbf_dot_white', 'matern_smooth', 'rbf_long'
-      kernel_key: ["rbf_white"]
+      kernel_key: ["matern_white"]
       n_restarts_optimizer: [10]
       normalize_y: [true, false]
       use_log_transform: [false]
@@ -95,10 +95,10 @@ models:
         #   anchor_window: 3
         # - type: NeutralPrior
         - type: AugmentedConsensusPrior
-          power: 0.5               # 1.0 = Linear, 0.5 = Square root
-          anchor_window: 3
+          power: 0.5              # 1.0 = Linear, 0.5 = Square root
+          anchor_window: 1
           min_annual_growth: null
           exog_col_idx: 0          # Index of driver column in X_exog
           driver_weight: 0.5       # 0.0 = Pure History, 1.0 = Pure Driver
-          memory_decay: 0.5
+          memory_decay: 0.2
           use_dynamic_weights: true

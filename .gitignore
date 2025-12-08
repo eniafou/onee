@@ -1,10 +1,12 @@
 .venv/
 __pycache__/
 /data/
+outputs/
 outputs_cd/
 outputs_srm/
 outputs_horizon/
 outputs_horizon_cd/
+outputs_sensibility/
 record/
 *.egg-info/
 *.egg

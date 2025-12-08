@@ -537,17 +537,19 @@ class AugmentedConsensusPrior(PowerGrowthPrior):
         # Anchor Coordinates (The "Launch Pad")
         self.anchor_x_val = None
         self.anchor_y_val = None
+
+        self.last_value = None
         
     def fit(self, years: np.ndarray, y_transformed: np.ndarray, X_exog: Optional[np.ndarray] = None):
         self.start_year_ref = np.min(years)
         t_relative = self._get_relative_time(years)
         X_power = np.power(t_relative, self.power).reshape(-1, 1)
+        self.last_value = y_transformed[-1]
         
         if self.memory_decay < 1.0:
             # Calculate age of each point (0 for newest, 1 for previous...)
             ages = np.max(years) - years
             weights = np.power(self.memory_decay, ages)
-            print(f"Using memory decay weights: {weights}")
             
             # Use LinearRegression because it supports sample_weight
             lr_time = LinearRegression()
@@ -613,11 +615,6 @@ class AugmentedConsensusPrior(PowerGrowthPrior):
             s_pull = s_future_exog * self.scale_ratio
             current_slope = self._compute_consensus_slope(self.slope_hist, s_pull)
 
-            print(f"Dynamic slope calculation: s_future_exog={s_future_exog}, scale_ratio={self.scale_ratio}, s_pull={s_pull}")
-            print(f"R2 Score: {self.r2_score}")
-            print(f"Historical slope: {self.slope_hist}")
-            print(f"Computed consensus slope: {current_slope}")
-
         # --- APPLY GROWTH FLOOR ---
         if self.min_annual_growth is not None:
             current_slope = max(current_slope, self.min_annual_growth)
@@ -653,34 +650,38 @@ class AugmentedConsensusPrior(PowerGrowthPrior):
         Combines History and Future Pull.
         If use_dynamic_weights is True, the weight depends on how linear the history was.
         """
+        def get_sign(x: float) -> int:
+            if x >= 0:
+                return 1
+            elif x < 0:
+                return -1
+            
         if s_pull == 0.0:
             if s_hist < 0.0:
-                if abs(s_hist) < 10**8:
-                    return s_hist * 2
-                else:
-                    s_hist = s_hist * 0.8
+                return s_hist * 0.8
             else:
                 if self.r2_score < 0.3:
                     return -1 * s_hist * 0.2
-            
-        
-        if self.r2_score > 0.6:
+                else:
+                    if self.last_value > 10**8:
+                        return -1 * s_hist
+
+        if self.r2_score > 0:
             if s_hist > 0.0 and s_pull > 0.0:
-                s_hist =  s_hist * 1.5
+                if self.last_value > 10**8:
+                    return -1 * s_hist
+                return  s_hist * 2
             if s_hist < 0.0 and s_pull < 0.0:
-                s_hist =  s_hist * 2
-        
-        if s_pull > 0 and s_hist < 0:
-            s_pull = s_pull * 0.5
+                return s_hist * 10
+    
+
 
         if self.use_dynamic_weights:
             # Here, we treat R2 as the "Trust in History".
-            trust_in_history = np.clip(self.r2_score, 0.05, 0.9) 
-            
-            # driver_weight becomes (1 - trust)
-            dynamic_driver_weight = 1.0 - trust_in_history
-            
-            return (s_hist * (1 - dynamic_driver_weight)) + (s_pull * dynamic_driver_weight)
+            trust_in_history = np.clip(self.r2_score, 0.01, 0.9) 
+            s_hist = get_sign(s_pull) * abs(s_hist)
+        
+            return s_hist * trust_in_history
         
         # Fallback to static weight
         return (s_hist * (1 - self.driver_weight)) + (s_pull * self.driver_weight)
@@ -1004,7 +1005,6 @@ class IntensityForecastWrapper(BaseForecastModel):
         if y is None or normalization_arr is None:
             raise ValueError(f"IntensityWrapper requires 'y' and 'normalization_arr' (values of {self.norm_col}).")
         
-        print(normalization_arr)
         self.history_norm_arr = np.array(normalization_arr, dtype=float)
 
         # 1. Calculate Intensity (Avoid division by zero)
@@ -1012,8 +1012,6 @@ class IntensityForecastWrapper(BaseForecastModel):
         safe_norm[safe_norm == 0] = 1.0
         
         y_intensity = y / safe_norm
-        print(y_intensity)
-        print("###################################################")
         
         # 2. Fit the internal model on Intensity
         self.model.fit(y=y_intensity, years=years, X=X, **kwargs)
@@ -1434,8 +1432,6 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
 
         # 3. Kernel Definition
         kernel = get_kernel(self.hyper_params["kernel_key"])
-        print("lllllllllllllllllllllllllllll")
-        print(kernel)
 
         if kernel is None:
             # Default kernel: RBF + WhiteKernel
@@ -1483,6 +1479,10 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
 
         if self.hyper_params["use_log_transform"]:
             return float(np.exp(final_pred))
+        
+        if final_pred < 0:
+            print(f"Warning: Predicted value is negative ({final_pred}). Setting to zero.")
+            final_pred = 0.0
         
         return float(final_pred)
 
@@ -1534,6 +1534,8 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
         trend_vals = self.prior.predict(future_years, X_exog)
 
         results = []
+        last_positive_mean = self.train_y[-1] if self.train_y is not None and len(self.train_y) > 0 else 1.0
+        
         for i, year in enumerate(future_years):
             print(f"Year: {year}, Trend: {trend_vals[i]}, Residual Mean: {resid_mean[i]}, Residual Std: {resid_std[i]}")
             y_mean = trend_vals[i] + resid_mean[i]
@@ -1553,6 +1555,17 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
                 final_mean = y_mean
                 final_lower = y_mean - 1.96 * y_std
                 final_upper = y_mean + 1.96 * y_std
+                
+                # If final_mean is negative, use the last positive value
+                if final_mean <= 0:
+                    print(f"Warning: Year {year} predicted negative value ({final_mean}). Using last positive value ({last_positive_mean}).")
+                    final_mean = last_positive_mean
+                    # Also clamp lower bound to 0
+                    final_lower = max(0.0, final_lower)
+            
+            # Update last positive mean for next iteration
+            if final_mean > 0:
+                last_positive_mean = final_mean
             
             results.append((int(year), float(final_mean), float(final_lower), float(final_upper)))
             
