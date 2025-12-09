@@ -8,7 +8,7 @@
 project:
   project_root: .  # Will be resolved to absolute path
   exp_name: exp
-  output_base_dir: outputs_horizon_cd
+  output_base_dir: outputs/outputs_horizon_cd
 
 # ───────────────────────────────────────────────────────────────────────
 # PILLAR 2: DATA

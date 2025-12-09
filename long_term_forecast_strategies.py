@@ -379,15 +379,16 @@ def run_long_horizon_forecast(
                 for yr in full_timeline_sorted
             ])
         
-        growth_model.plot_forecast(
-            horizon_preds, 
-            title=region_entity,
-            save_plot=True,
-            save_folder=save_folder,
-            df_monthly=df_monthly,
-            X_exog=X_exog_full,
-            normalization_arr_full=normalization_arr_full
-        )
+        if save_folder:
+            growth_model.plot_forecast(
+                horizon_preds, 
+                title=region_entity,
+                save_plot=True,
+                save_folder=save_folder,
+                df_monthly=df_monthly,
+                X_exog=X_exog_full,
+                normalization_arr_full=normalization_arr_full
+            )
 
     return {
         "horizon_predictions": processed_horizon_preds,

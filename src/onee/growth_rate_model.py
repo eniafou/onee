@@ -1103,7 +1103,8 @@ class IntensityForecastWrapper(BaseForecastModel):
         df_monthly: Optional[pd.DataFrame] = None,
         target_col: str = Aliases.CONSOMMATION_KWH,
         X_exog: Optional[np.ndarray] = None,
-        normalization_arr_full: Optional[np.ndarray] = None
+        normalization_arr_full: Optional[np.ndarray] = None,
+        **kwargs
     ):
         """
         Visualizes the TOTAL Consumption Forecast.
@@ -1586,7 +1587,8 @@ class GaussianProcessForecastModel(ParamIntrospectionMixin, BaseForecastModel):
         save_folder: str = ".",
         df_monthly: Optional[pd.DataFrame] = None,
         target_col: str = Aliases.CONSOMMATION_KWH,
-        X_exog: Optional[np.ndarray] = None
+        X_exog: Optional[np.ndarray] = None,
+        **kwargs
     ):
         """
         Visualizes the forecast, confidence intervals, actuals, AND the underlying Growth Trend.

@@ -7,7 +7,7 @@
 # ───────────────────────────────────────────────────────────────────────
 project:
   project_root: .
-  exp_name: srm_test
+  exp_name: exp
 
 # ───────────────────────────────────────────────────────────────────────
 # DATA
@@ -29,6 +29,8 @@ data:
     Rabat-Salé-Kénitra: 0
     Tanger-Tétouan-Al Hoceïma: 0
     Souss-Massa: 0
+
+  run_levels: [0]
   
   # Database paths
   db_path: data/all_data.db

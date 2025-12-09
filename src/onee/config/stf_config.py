@@ -38,6 +38,8 @@ class DataConfig(BaseModel):
     
     regions: Optional[Union[Dict[str, int], List[str]]] = None
     
+    run_levels: List[int]
+    
     # Database paths (relative to project_root)
     db_path: str = "data/all_data.db"
 

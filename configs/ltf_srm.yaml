@@ -7,8 +7,8 @@
 # ───────────────────────────────────────────────────────────────────────
 project:
   project_root: .  # Will be resolved to absolute path
-  exp_name: gp_test
-  output_base_dir: outputs_horizon
+  exp_name: exp
+  output_base_dir: outputs/outputs_horizon
 
 # ───────────────────────────────────────────────────────────────────────
 # PILLAR 2: DATA
@@ -32,14 +32,8 @@ data:
     - Souss-Massa
   
   # Run levels:
-  # 1: Individual Activities
-  # 2: Aggregated BT
-  # 3: Aggregated MT
-  # 4: Total Regional
-  # 5: Individual Distributors
-  # 6: All Distributors
-  # 7: SRM (Regional + Distributors)
-  run_levels: [7]
+  # 1: SRM
+  run_levels: [1]
   
   # Database paths (relative to project_root)
   db_path: data/all_data.db
