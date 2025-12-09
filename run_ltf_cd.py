@@ -6,11 +6,12 @@ import os
 from short_term_forecast_strategies import (
     create_monthly_matrix,
 )
-from long_term_forecast_strategies import run_long_horizon_forecast
+from long_term_forecast_strategies import run_long_horizon_forecast, create_summary_dataframe
 from onee.utils import fill_2020_with_avg, get_move_in_year, clean_name
 from onee.config.ltf_config import LongTermForecastConfig
 from onee.data.loader import DataLoader
 from onee.data.names import Aliases
+
 
 import numpy as np
 import pandas as pd
@@ -25,42 +26,6 @@ warnings.filterwarnings("ignore")
 # ─────────────────────────────────────────────────────────────
 # HELPER FUNCTIONS
 # ─────────────────────────────────────────────────────────────
-
-def create_summary_dataframe(all_results):
-    """
-    Create a summary DataFrame from forecast results
-    
-    Args:
-        all_results: List of forecast result dictionaries
-        
-    Returns:
-        pandas DataFrame with flattened summary records
-    """
-    df_summary_records = []
-    for r in all_results:
-        for y, v, actual, percent_error in zip(
-            r["forecast_years"], r["pred_annual"], r["actuals"], r["percent_errors"]
-        ):
-            # Flatten run parameters for the summary sheet
-            rp = r.get("run_parameters", {}) or {}
-            growth = rp.get("growth_model", {}) or {}
-            feature_config = rp.get("feature_config", {}) or {}
-
-            df_summary_records.append(
-                {
-                    "Train_Start": r.get("train_start"),
-                    "Train_End": r.get("train_end"),
-                    "Level": r["level"],
-                    "Year": y,
-                    "Predicted_Annual": v,
-                    "Actual_Annual": actual,
-                    "Percent_Error": percent_error,
-                    **feature_config,
-                    **growth
-                }
-            )
-
-    return pd.DataFrame(df_summary_records)
 
 
 # ─────────────────────────────────────────────────────────────

@@ -24,7 +24,7 @@ data:
   # Run levels for CD:
   # 1: Regions
   # 2: Activities
-  run_levels: [1]
+  run_levels: [2]
   
   # Database paths (relative to project_root)
   db_path: data/all_data.db

@@ -13,10 +13,78 @@ from onee.config.stf_config import ShortTermForecastConfig
 from onee.data.loader import DataLoader
 from onee.data.names import Aliases
 
+def prepare_prediction_output(all_results_by_region):
+    """
+    Create a tall DataFrame with monthly predictions from all_results_by_region.
+    
+    Args:
+        all_results_by_region: Dictionary mapping region names to lists of result dictionaries
+        
+    Returns:
+        pandas DataFrame with columns: Region, Activity, Year, Month, Consommation
+        
+    Notes:
+        - For level 0 (SRM), adds an artificial activity called "Total"
+        - Extracts monthly predictions from the best_model of each result
+    """
 
-# ────────────────────────────────────────────────────────────────────────────────
-# MAIN EXECUTION
-# ────────────────────────────────────────────────────────────────────────────────
+    def extract_activity(entity_name: str) -> str:
+        prefix = "Activity_"
+        if entity_name.startswith(prefix):
+            return entity_name[len(prefix):]
+        return entity_name  # fallback if format is unexpected
+    
+    records = []
+    
+    for region, results_list in all_results_by_region.items():
+        if not results_list:
+            continue
+            
+        for result in results_list:
+            entity = result.get("entity", "")
+            best_model = result.get("best_model", {})
+            monthly_details = result.get("monthly_details", {})
+            
+            if not monthly_details:
+                continue
+            
+            # Determine activity name
+            # If entity is empty or equals region, it's level 0 (SRM) -> use "Total"
+            if not entity or entity.startswith("SRM_"):
+                activity = "Total"
+            else:
+                activity = extract_activity(entity)
+            
+            # Extract monthly predictions for each year
+            for year, df_monthly in monthly_details.items():
+                if df_monthly is None or df_monthly.empty:
+                    continue
+                
+                # Iterate through each month in the year
+                for _, row in df_monthly.iterrows():
+                    month = row.get("Month")
+                    predicted = row.get("Predicted")
+                    
+                    if month is not None and predicted is not None:
+                        records.append({
+                            "Region": region,
+                            "Activity": activity,
+                            "Year": year,
+                            "Month": int(month),
+                            "Consommation": predicted
+                        })
+    
+    if not records:
+        # Return empty DataFrame with correct columns if no data
+        return pd.DataFrame(columns=["Region", "Activity", "Year", "Month", "Consommation"])
+    
+    df = pd.DataFrame(records)
+    
+    # Sort for better readability
+    df = df.sort_values(["Region", "Activity", "Year", "Month"]).reset_index(drop=True)
+    
+    return df
+
 
 def run_stf_srm_forecast(config_path="configs/stf_srm.yaml", use_output_dir=False):
     """

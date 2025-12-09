@@ -63,41 +63,18 @@ class CDColumns:
     MONTH = "month"
     ACTIVITE = "Activite"
     CONSOMMATION_KWH = "Consommation_Kwh"
+    CONSOMMATION_ZCONHC = "Consommation_ZCONHC"
+    CONSOMMATION_ZCONHL = "Consommation_ZCONHL"
+    CONSOMMATION_ZCONHP = "Consommation_ZCONHP"
     PUISSANCE_FACTUREE = "Puissance_facturee"
     PUISSANCE_APPELEE = "Puissance_appelee"
     DATE_EMMENAGEMENT = "Date_emmenagement"
     DATE_DEMENAGEMENT = "Date_demenagement"
-
-
-# ============================================================================
-# Column Names - Active Contrats Features Table
-# ============================================================================
-
-class ActiveContratsColumns:
-    """Column names for Active_Contrats_Features table."""
-    ANNEE = "annee"
-    ACTIVITE = "activite"
-    TOTAL_ACTIVE_CONTRATS = "total_active_contrats"
-    JUST_STARTED = "just_started"
-    TWO_YEARS_OLD = "two_years_old"
-    THREE_YEARS_OLD = "three_years_old"
-    MORE_THAN_3_YEARS_OLD = "more_than_3_years_old"
-    PUISSANCE_FACTUREE_TOTAL = "puissance_facturee_total"
-    PUISSANCE_FACTUREE_JUST_STARTED = "puissance_facturee_just_started"
-    PUISSANCE_FACTUREE_TWO_YEARS_OLD = "puissance_facturee_two_years_old"
-    PUISSANCE_FACTUREE_THREE_YEARS_OLD = "puissance_facturee_three_years_old"
-    PUISSANCE_FACTUREE_MORE_THAN_3_YEARS_OLD = "puissance_facturee_more_than_3_years_old"
-    PUISSANCE_APPELEE_TOTAL = "puissance_appelee_total"
-    PUISSANCE_APPELEE_JUST_STARTED = "puissance_appelee_just_started"
-    PUISSANCE_APPELEE_TWO_YEARS_OLD = "puissance_appelee_two_years_old"
-    PUISSANCE_APPELEE_THREE_YEARS_OLD = "puissance_appelee_three_years_old"
-    PUISSANCE_APPELEE_MORE_THAN_3_YEARS_OLD = "puissance_appelee_more_than_3_years_old"
-
+    NIVEAU_TENSION = "Niveau_de_tension"
 
 # ============================================================================
 # SQL Query Aliases (used throughout codebase)
 # ============================================================================
-
 class Aliases:
     """Standard aliases used in SQL queries and DataFrame columns."""
     # Time columns
@@ -116,6 +93,10 @@ class Aliases:
     CONSOMMATION_KWH = "consommation_kwh"
     PUISSANCE_FACTUREE = "puissance_facturee"
     PUISSANCE_APPELEE = "puissance_appelee"
+    NIVEAU_TENSION = "niveau_tension"
+    CONSOMMATION_ZCONHC = "consommation_zconhc"
+    CONSOMMATION_ZCONHL = "consommation_zconhl"
+    CONSOMMATION_ZCONHP = "consommation_zconhp"
     
     # Economic indicators
     PIB_MDH = "pib_mdh"

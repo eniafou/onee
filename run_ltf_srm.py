@@ -5,7 +5,7 @@
 from short_term_forecast_strategies import (
     create_monthly_matrix,
 )
-from long_term_forecast_strategies import run_long_horizon_forecast
+from long_term_forecast_strategies import run_long_horizon_forecast, create_summary_dataframe
 from onee.utils import fill_2020_with_avg, clean_name
 from onee.config.ltf_config import LongTermForecastConfig
 from onee.data.loader import DataLoader
@@ -24,49 +24,34 @@ warnings.filterwarnings("ignore")
 # ─────────────────────────────────────────────────────────────
 # HELPER FUNCTIONS
 # ─────────────────────────────────────────────────────────────
-
-def create_summary_dataframe(all_results):
+def prepare_prediction_output(all_results):
     """
-    Create a summary DataFrame from forecast results
+    Create a simple summary DataFrame with Region, Year, and Predicted_Annual
     
     Args:
         all_results: List of forecast result dictionaries
         
     Returns:
-        pandas DataFrame with flattened summary records
+        pandas DataFrame with Region, Year, and Predicted_Annual columns
     """
     df_summary_records = []
     for r in all_results:
-        for y, v, actual, percent_error in zip(
-            r["forecast_years"], r["pred_annual"], r["actuals"], r["percent_errors"]
-        ):
-            # Flatten run parameters for the summary sheet
-            rp = r.get("run_parameters", {}) or {}
-            growth = rp.get("growth_model", {}) or {}
-            feature_config = rp.get("feature_config", {}) or {}
-
+        for y, v in zip(r["forecast_years"], r["pred_annual"]):
             df_summary_records.append(
                 {
-                    "Region": r["region"],
-                    "Train_Start": r.get("train_start"),
-                    "Train_End": r.get("train_end"),
-                    "Level": r["level"],
+                    "Region": r.get("region"),
                     "Year": y,
-                    "Predicted_Annual": v,
-                    "Actual_Annual": actual,
-                    "Percent_Error": percent_error,
-                    **feature_config,
-                    **growth
+                    "Consommation": v
                 }
             )
-
+    
     return pd.DataFrame(df_summary_records)
+
 
 
 # ─────────────────────────────────────────────────────────────
 # MAIN EXECUTION
 # ─────────────────────────────────────────────────────────────
-
 def run_ltf_srm_forecast(config_path="configs/ltf_srm.yaml", use_output_dir=False):
     """
     Execute LTF SRM forecast and return results
@@ -137,7 +122,7 @@ def run_ltf_srm_forecast(config_path="configs/ltf_srm.yaml", use_output_dir=Fals
                 if 1 in RUN_LEVELS:        
                     if len(df_dist) >= 1:                    
                         print(
-                            f"\n{'#'*60}\nLEVEL 7: SRM (Regional + Distributors)\n{'#'*60}"
+                            f"\n{'#'*60}\nLEVEL 1: SRM (Regional + Distributors)\n{'#'*60}"
                         )
                         DataLoader.aggregate_predictions(
                             client_predictions_lookup,
@@ -163,8 +148,8 @@ def run_ltf_srm_forecast(config_path="configs/ltf_srm.yaml", use_output_dir=Fals
                             .reset_index()
                         )
 
-                        # if config.data.impute_2020:
-                        #     df_srm = fill_2020_with_avg(df_srm, config.data.target_variable)
+                        if config.data.impute_2020:
+                            df_srm = fill_2020_with_avg(df_srm, config.data.target_variable)
 
                         df_srm = df_srm[df_srm[Aliases.ANNEE] >= 2013]
                         df_train = df_srm[df_srm[Aliases.ANNEE] <= train_end]

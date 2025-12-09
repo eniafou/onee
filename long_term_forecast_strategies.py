@@ -5,6 +5,7 @@ from onee.growth_rate_model import (
 from onee.utils import select_best_model, calculate_all_annual_metrics
 from onee.data.names import Aliases
 import numpy as np
+import pandas as pd
 
 def run_annual_loocv_grid_search(
     monthly_matrix,
@@ -400,3 +401,40 @@ def run_long_horizon_forecast(
         },
     }
 
+
+def create_summary_dataframe(all_results):
+    """
+    Create a summary DataFrame from forecast results
+    
+    Args:
+        all_results: List of forecast result dictionaries
+        
+    Returns:
+        pandas DataFrame with flattened summary records
+    """
+    df_summary_records = []
+    for r in all_results:
+        for y, v, actual, percent_error in zip(
+            r["forecast_years"], r["pred_annual"], r["actuals"], r["percent_errors"]
+        ):
+            # Flatten run parameters for the summary sheet
+            rp = r.get("run_parameters", {}) or {}
+            growth = rp.get("growth_model", {}) or {}
+            feature_config = rp.get("feature_config", {}) or {}
+
+            df_summary_records.append(
+                {
+                    "Region": r.get("region"),
+                    "Train_Start": r.get("train_start"),
+                    "Train_End": r.get("train_end"),
+                    "Level": r.get("level"),
+                    "Year": y,
+                    "Predicted_Annual": v,
+                    "Actual_Annual": actual,
+                    "Percent_Error": percent_error,
+                    **feature_config,
+                    **growth
+                }
+            )
+
+    return pd.DataFrame(df_summary_records)

@@ -15,7 +15,7 @@ import pandas as pd
 
 from onee.utils import clean_name, require_columns
 from onee.data.names import (
-    Tables, GRDColumns, ExogenousColumns, CDColumns, ActiveContratsColumns,
+    Tables, GRDColumns, ExogenousColumns, CDColumns,
     Aliases, GRDValues, build_variable_specs
 )
 from onee.utils import get_move_in_year, get_move_out_year
@@ -220,6 +220,10 @@ class DataLoader:
         {CDColumns.MONTH} as {Aliases.MOIS}, 
         {CDColumns.ACTIVITE} as {Aliases.ACTIVITE}, 
         {CDColumns.CONSOMMATION_KWH} as {Aliases.CONSOMMATION_KWH},
+        {CDColumns.CONSOMMATION_ZCONHC} as {Aliases.CONSOMMATION_ZCONHC},
+        {CDColumns.CONSOMMATION_ZCONHL} as {Aliases.CONSOMMATION_ZCONHL},
+        {CDColumns.CONSOMMATION_ZCONHP} as {Aliases.CONSOMMATION_ZCONHP},
+        {CDColumns.NIVEAU_TENSION} as {Aliases.NIVEAU_TENSION},
         {CDColumns.PUISSANCE_FACTUREE} as '{Aliases.PUISSANCE_FACTUREE}',
         {CDColumns.PUISSANCE_APPELEE} as '{Aliases.PUISSANCE_APPELEE}',
         {CDColumns.DATE_EMMENAGEMENT} as '{Aliases.DATE_EMMENAGEMENT}',
