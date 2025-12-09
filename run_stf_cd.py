@@ -22,8 +22,7 @@ def prepare_prediction_output(all_results, df_contrats):
         
     Returns:
         pandas DataFrame with columns: 
-            Region, Partenaire, Contrat, Activity, Year, Month, 
-            Consommation_Total, Puissance_Facturee, Niveau_tension
+            Region, Partenaire, Contrat, Activity, Year, Month, Consommation_Total
     """
     import pandas as pd
     from onee.data.names import Aliases
@@ -42,29 +41,6 @@ def prepare_prediction_output(all_results, df_contrats):
         })
     )
     contract_lookup = contract_info.set_index(Aliases.CONTRAT).to_dict('index')
-    
-    # Build a lookup for Puissance_Facturee by (contrat, year, month)
-    pf_lookup = (
-        df_contrats
-        .groupby([Aliases.CONTRAT, Aliases.ANNEE, Aliases.MOIS], as_index=False)
-        .agg({Aliases.PUISSANCE_FACTUREE: 'sum'})
-    )
-    pf_dict = {
-        (row[Aliases.CONTRAT], row[Aliases.ANNEE], row[Aliases.MOIS]): row[Aliases.PUISSANCE_FACTUREE]
-        for _, row in pf_lookup.iterrows()
-    }
-    
-
-    nt_lookup = (
-        df_contrats
-        .groupby([Aliases.CONTRAT, Aliases.ANNEE, Aliases.MOIS], as_index=False)
-        .agg({Aliases.NIVEAU_TENSION: 'first'})
-    )
-    nt_dict = {
-        (row[Aliases.CONTRAT], row[Aliases.ANNEE], row[Aliases.MOIS]): row[Aliases.NIVEAU_TENSION]
-        for _, row in nt_lookup.iterrows()
-    }
-
     
     for result in all_results:
         if result is None:
@@ -91,7 +67,6 @@ def prepare_prediction_output(all_results, df_contrats):
         region = info.get(Aliases.REGION, None)
         partenaire = info.get(Aliases.PARTENAIRE, None)
         activite = info.get(Aliases.ACTIVITE, None)
-        niveau_tension =  nt_dict.get(contrat, None) if nt_dict.get(contrat, None) else "HT"
         
         # Extract monthly predictions for each year
         for year, df_monthly in monthly_details.items():
@@ -105,9 +80,6 @@ def prepare_prediction_output(all_results, df_contrats):
                 if month is None or predicted is None:
                     continue
                 
-                # Get Puissance_Facturee from lookup
-                pf_value = pf_dict.get((contrat, year, int(month)), None)
-                
                 records.append({
                     "Region": region,
                     "Partenaire": partenaire,
@@ -116,14 +88,12 @@ def prepare_prediction_output(all_results, df_contrats):
                     "Year": year,
                     "Month": int(month),
                     "Consommation_Total": predicted,
-                    "Puissance_Facturee": pf_value,
-                    "Niveau_tension": niveau_tension
                 })
     
     if not records:
         return pd.DataFrame(columns=[
             "Region", "Partenaire", "Contrat", "Activity", 
-            "Year", "Month", "Consommation_Total", "Puissance_Facturee", "Niveau_tension"
+            "Year", "Month", "Consommation_Total"
         ])
     
     df = pd.DataFrame(records)
@@ -137,7 +107,8 @@ def prepare_prediction_output(all_results, df_contrats):
 
 def prepare_ca_output(df_prediction, df_contrats):
     """
-    Add consumption breakdown columns (ZCONHC, ZCONHL, ZCONHP) to the output DataFrame.
+    Add consumption breakdown columns (ZCONHC, ZCONHL, ZCONHP), Puissance_Facturee, 
+    and Niveau_tension to the output DataFrame.
     
     For each (contrat, year, month) in df_prediction, finds the latest available data
     in df_contrats (where year/month <= target) and calculates percentages from
@@ -148,7 +119,8 @@ def prepare_ca_output(df_prediction, df_contrats):
         df_contrats: DataFrame with Consommation_ZCONHC, Consommation_ZCONHL, Consommation_ZCONHP
         
     Returns:
-        DataFrame with added columns: Consommation_ZCONHC, Consommation_ZCONHL, Consommation_ZCONHP
+        DataFrame with added columns: Consommation_ZCONHC, Consommation_ZCONHL, Consommation_ZCONHP,
+                                      Puissance_Facturee, Niveau_tension
     """
     
     # Column names for the breakdown
@@ -156,10 +128,11 @@ def prepare_ca_output(df_prediction, df_contrats):
     ZCONHL = "Consommation_ZCONHL"
     ZCONHP = "Consommation_ZCONHP"
     
-    # Prepare df_contrats with required columns
+    # Prepare df_contrats with required columns for consumption breakdown
     contrats_subset = df_contrats[[
         Aliases.CONTRAT, Aliases.ANNEE, Aliases.MOIS,
-        Aliases.CONSOMMATION_ZCONHC, Aliases.CONSOMMATION_ZCONHL, Aliases.CONSOMMATION_ZCONHP
+        Aliases.CONSOMMATION_ZCONHC, Aliases.CONSOMMATION_ZCONHL, Aliases.CONSOMMATION_ZCONHP,
+        Aliases.PUISSANCE_FACTUREE, Aliases.NIVEAU_TENSION
     ]].copy()
     
     # Create a sort key for finding latest available data
@@ -177,6 +150,8 @@ def prepare_ca_output(df_prediction, df_contrats):
     df_output[ZCONHC] = None
     df_output[ZCONHL] = None
     df_output[ZCONHP] = None
+    df_output["Puissance_Facturee"] = None
+    df_output["Niveau_tension"] = None
     
     # Group contrats data for faster lookup
     contrats_grouped = contrats_subset.groupby(Aliases.CONTRAT)
@@ -192,41 +167,51 @@ def prepare_ca_output(df_prediction, df_contrats):
         try:
             contract_data = contrats_grouped.get_group(contrat)
         except KeyError:
-            # Contract not found in df_contrats
+            # Contract not found in df_contrats - use fallback values
+            df_output.at[idx, ZCONHC] = cons_total / 3
+            df_output.at[idx, ZCONHL] = cons_total / 3
+            df_output.at[idx, ZCONHP] = cons_total / 3
+            df_output.at[idx, "Niveau_tension"] = "HT"
             continue
         
         # Find latest available data (year_month <= target)
         available = contract_data[contract_data["_year_month"] <= target_ym]
         
         if available.empty:
-            df_output.at[idx, ZCONHC] = cons_total * 1/3
-            df_output.at[idx, ZCONHL] = cons_total * 1/3
-            df_output.at[idx, ZCONHP] = cons_total * 1/3
+            df_output.at[idx, ZCONHC] = cons_total / 3
+            df_output.at[idx, ZCONHL] = cons_total / 3
+            df_output.at[idx, ZCONHP] = cons_total / 3
+            df_output.at[idx, "Niveau_tension"] = "HT"
             continue
         
         # Get the latest row (first due to descending sort)
         latest = available.iloc[0]
         
+        # Set Puissance_Facturee and Niveau_tension from latest available data
+        df_output.at[idx, "Puissance_Facturee"] = latest[Aliases.PUISSANCE_FACTUREE]
+        niveau_tension = latest[Aliases.NIVEAU_TENSION]
+        df_output.at[idx, "Niveau_tension"] = niveau_tension if niveau_tension else "HT"
+        
         # Calculate total from breakdown columns
         total_breakdown = (
-            latest[ZCONHC] + latest[ZCONHL] + latest[ZCONHP]
+            latest[Aliases.CONSOMMATION_ZCONHC] + latest[Aliases.CONSOMMATION_ZCONHL] + latest[Aliases.CONSOMMATION_ZCONHP]
         )
         
         if total_breakdown > 0:
             # Calculate percentages
-            pct_hc = latest[ZCONHC] / total_breakdown
-            pct_hl = latest[ZCONHL] / total_breakdown
-            pct_hp = latest[ZCONHP] / total_breakdown
+            pct_hc = latest[Aliases.CONSOMMATION_ZCONHC] / total_breakdown
+            pct_hl = latest[Aliases.CONSOMMATION_ZCONHL] / total_breakdown
+            pct_hp = latest[Aliases.CONSOMMATION_ZCONHP] / total_breakdown
             
             # Apply percentages to Consommation_Total
             df_output.at[idx, ZCONHC] = cons_total * pct_hc
             df_output.at[idx, ZCONHL] = cons_total * pct_hl
             df_output.at[idx, ZCONHP] = cons_total * pct_hp
         else:
-            # If total is zero, set all to zero
-            df_output.at[idx, ZCONHC] = cons_total * 1/3
-            df_output.at[idx, ZCONHL] = cons_total * 1/3
-            df_output.at[idx, ZCONHP] = cons_total * 1/3
+            # If total is zero, split equally
+            df_output.at[idx, ZCONHC] = cons_total / 3
+            df_output.at[idx, ZCONHL] = cons_total / 3
+            df_output.at[idx, ZCONHP] = cons_total / 3
     
     return df_output
 

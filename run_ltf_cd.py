@@ -26,6 +26,207 @@ warnings.filterwarnings("ignore")
 # ─────────────────────────────────────────────────────────────
 # HELPER FUNCTIONS
 # ─────────────────────────────────────────────────────────────
+def prepare_prediction_output(all_results):
+    """
+    Create a simple summary DataFrame with Region, Year, and Predicted_Annual
+    
+    Args:
+        all_results: List of forecast result dictionaries
+        
+    Returns:
+        pandas DataFrame with Region, Year, and Predicted_Annual columns
+    """
+    df_summary_records = []
+    for r in all_results:
+        for y, v in zip(r["forecast_years"], r["pred_annual"]):
+            df_summary_records.append(
+                {
+                    "Activity": r.get("activity"),
+                    "Year": y,
+                    "Consommation_Total": v
+                }
+            )
+    
+    return pd.DataFrame(df_summary_records)
+
+
+def prepare_ca_output(df_prediction, df_contrats):
+    """
+    For each unique (Activity, Year) in df_prediction, find all contracts still operating 
+    (move_out_year >= year) and distribute Consommation_Total based on Puissance_Facturee.
+    Then apply consumption breakdown percentages.
+    
+    Args:
+        df_prediction: DataFrame with Activity, Year, and Consommation_Total columns
+        df_contrats: DataFrame with contract data including DATE_DEMENAGEMENT
+        
+    Returns:
+        DataFrame with columns: Region, Partenaire, Contrat, Activity, Year,
+                               Consommation_Total, Consommation_ZCONHC, Consommation_ZCONHL, 
+                               Consommation_ZCONHP, Puissance_Facturee, Niveau_tension
+    """
+    from onee.utils import get_move_out_year
+    
+    # Column names for the output breakdown
+    ZCONHC = "Consommation_ZCONHC"
+    ZCONHL = "Consommation_ZCONHL"
+    ZCONHP = "Consommation_ZCONHP"
+    
+    # Get unique contracts and compute move_out_year for each
+    contracts = df_contrats[Aliases.CONTRAT].unique()
+    
+    contract_move_out = {}
+    for contrat in contracts:
+        df_c = df_contrats[df_contrats[Aliases.CONTRAT] == contrat]
+        move_out_year = get_move_out_year(df_c)
+        contract_move_out[contrat] = move_out_year
+    
+    # Build contract metadata lookup (Region, Partenaire, Activity)
+    contract_info = (
+        df_contrats
+        .groupby(Aliases.CONTRAT, as_index=False)
+        .agg({
+            Aliases.REGION: 'first',
+            Aliases.PARTENAIRE: 'first',
+            Aliases.ACTIVITE: 'first',
+        })
+    )
+    contract_lookup = contract_info.set_index(Aliases.CONTRAT).to_dict('index')
+    
+    # Prepare df_contrats subset for latest value lookups
+    contrats_subset = df_contrats[[
+        Aliases.CONTRAT, Aliases.ANNEE, Aliases.MOIS,
+        Aliases.CONSOMMATION_ZCONHC, Aliases.CONSOMMATION_ZCONHL, Aliases.CONSOMMATION_ZCONHP,
+        Aliases.PUISSANCE_FACTUREE, Aliases.NIVEAU_TENSION
+    ]].copy()
+    
+    # Create a sort key for finding latest available data
+    contrats_subset["_year_month"] = (
+        contrats_subset[Aliases.ANNEE] * 12 + contrats_subset[Aliases.MOIS]
+    )
+    
+    # Sort by contrat and year_month descending to easily find latest
+    contrats_subset = contrats_subset.sort_values(
+        [Aliases.CONTRAT, "_year_month"], ascending=[True, False]
+    )
+    
+    # Group contrats data for faster lookup
+    contrats_grouped = contrats_subset.groupby(Aliases.CONTRAT)
+    
+    records = []
+    
+    # Process each (Activity, Year) from predictions
+    for _, pred_row in df_prediction.iterrows():
+        activity = pred_row["Activity"]
+        year = pred_row["Year"]
+        total_consumption = pred_row["Consommation_Total"]
+        
+        # Target year_month for lookup (end of year = December)
+        target_ym = year * 12 + 12
+        
+        # Find all contracts for this activity that are still operating (move_out_year >= year)
+        active_contracts = []
+        for contrat, move_out in contract_move_out.items():
+            info = contract_lookup.get(contrat, {})
+            contrat_activity = info.get(Aliases.ACTIVITE, None)
+            if contrat_activity == activity and (move_out is None or move_out >= year):
+                active_contracts.append(contrat)
+        
+        # First pass: collect Puissance_Facturee and other data for all active contracts
+        contract_data_list = []
+        for contrat in active_contracts:
+            info = contract_lookup.get(contrat, {})
+            region = info.get(Aliases.REGION, None)
+            partenaire = info.get(Aliases.PARTENAIRE, None)
+            activite = info.get(Aliases.ACTIVITE, None)
+            
+            pf_value = 0.0
+            niveau_tension = "HT"
+            pct_hc = 1/3
+            pct_hl = 1/3
+            pct_hp = 1/3
+            
+            try:
+                contract_data = contrats_grouped.get_group(contrat)
+                available = contract_data[contract_data["_year_month"] <= target_ym]
+                
+                if not available.empty:
+                    latest = available.iloc[0]
+                    pf_value = latest[Aliases.PUISSANCE_FACTUREE] or 0.0
+                    nt = latest[Aliases.NIVEAU_TENSION]
+                    niveau_tension = nt if nt else "HT"
+                    
+                    # Calculate breakdown percentages
+                    zconhc_hist = latest[Aliases.CONSOMMATION_ZCONHC] or 0.0
+                    zconhl_hist = latest[Aliases.CONSOMMATION_ZCONHL] or 0.0
+                    zconhp_hist = latest[Aliases.CONSOMMATION_ZCONHP] or 0.0
+                    total_breakdown = zconhc_hist + zconhl_hist + zconhp_hist
+                    
+                    if total_breakdown > 0:
+                        pct_hc = zconhc_hist / total_breakdown
+                        pct_hl = zconhl_hist / total_breakdown
+                        pct_hp = zconhp_hist / total_breakdown
+                    
+            except KeyError:
+                pass
+            
+            contract_data_list.append({
+                "contrat": contrat,
+                "region": region,
+                "partenaire": partenaire,
+                "activite": activite,
+                "pf_value": pf_value,
+                "niveau_tension": niveau_tension,
+                "pct_hc": pct_hc,
+                "pct_hl": pct_hl,
+                "pct_hp": pct_hp,
+            })
+        
+        # Calculate total Puissance_Facturee for this activity-year
+        total_pf = sum(c["pf_value"] for c in contract_data_list)
+        
+        # Second pass: distribute consumption and apply percentages
+        for c in contract_data_list:
+            # Calculate contract's share of consumption based on Puissance_Facturee
+            if total_pf > 0:
+                pf_share = c["pf_value"] / total_pf
+            else:
+                # If no Puissance_Facturee data, distribute equally
+                pf_share = 1 / len(contract_data_list) if contract_data_list else 0
+            
+            contract_consumption = total_consumption * pf_share
+            
+            # Apply breakdown percentages to get ZCONHC, ZCONHL, ZCONHP
+            records.append({
+                "Region": c["region"],
+                "Partenaire": c["partenaire"],
+                "Contrat": c["contrat"],
+                "Activity": c["activite"],
+                "Year": year,
+                "Consommation_Total": contract_consumption,
+                ZCONHC: contract_consumption * c["pct_hc"],
+                ZCONHL: contract_consumption * c["pct_hl"],
+                ZCONHP: contract_consumption * c["pct_hp"],
+                "Puissance_Facturee": c["pf_value"],
+                "Niveau_tension": c["niveau_tension"]
+            })
+    
+    if not records:
+        return pd.DataFrame(columns=[
+            "Region", "Partenaire", "Contrat", "Activity", "Year",
+            "Consommation_Total", ZCONHC, ZCONHL, ZCONHP, 
+            "Puissance_Facturee", "Niveau_tension"
+        ])
+    
+    df_output = pd.DataFrame(records)
+    
+    # Sort for better readability
+    df_output = df_output.sort_values(
+        ["Region", "Partenaire", "Contrat", "Activity", "Year"]
+    ).reset_index(drop=True)
+    
+    return df_output
+
 
 
 # ─────────────────────────────────────────────────────────────
@@ -74,75 +275,6 @@ def run_ltf_cd_forecast(config_path="configs/ltf_cd.yaml", output_dir=None):
             )
 
             if 1 in RUN_LEVELS:
-                print(f"\n{'#'*60}")
-                print(f"LEVEL 1: REGION")
-                print(f"{'#'*60}")
-
-                regions = sorted(df_contrats[Aliases.REGION].unique())
-
-                # --- Process regions ---
-                for region in regions:
-                    df_region = df_contrats[df_contrats[Aliases.REGION] == region].copy()
-                    df_region = df_region.groupby([Aliases.ANNEE, Aliases.MOIS]).agg({
-                        config.data.target_variable: 'sum',
-                        Aliases.PUISSANCE_FACTUREE: 'sum'
-                    }).reset_index()
-                    
-                    df_train = df_region[
-                        (df_region[Aliases.ANNEE] >= train_start) & (df_region[Aliases.ANNEE] <= train_end)
-                    ]
-                    monthly_matrix = create_monthly_matrix(
-                        df_train, value_col=config.data.target_variable
-                    )
-                    years = np.sort(df_train[Aliases.ANNEE].unique())
-
-                    df_activite_features = data_loader.compute_contract_features(df_contrats, entity_col=Aliases.REGION, end_year=train_end + config.temporal.horizon)
-                    df_r = df_activite_features[df_activite_features[Aliases.REGION] == region]
-                    df_r = df_r.merge(df_features, on=Aliases.ANNEE)
-                     
-                    res = run_long_horizon_forecast(
-                        monthly_matrix=monthly_matrix,
-                        years=years,
-                        df_features=df_r,
-                        df_monthly=df_region,
-                        config=config,
-                        MODEL_REGISTRY=MODEL_REGISTRY,
-                        region_entity=f"CD - région {region}",
-                        save_folder=output_dir / f"region_{region}" if output_dir else None,
-                    )
-                    
-                    forecast_years = [y for y, _ in res["horizon_predictions"]]
-                    pred_annual = [float(v) for _, v in res["horizon_predictions"]]
-                    actuals = []
-                    percent_errors = []
-                    for y, v in zip(forecast_years, pred_annual):
-                        actual = None
-                        percent_error = None
-                        mask = df_region[Aliases.ANNEE] == y
-                        if not df_region.loc[mask, config.data.target_variable].empty:
-                            actual = df_region.loc[mask, config.data.target_variable].sum()
-                            percent_error = (
-                                (v - actual) / actual * 100 if actual != 0 else None
-                            )
-
-                        actuals.append(actual)
-                        percent_errors.append(percent_error)
-
-                    all_results.append(
-                        {
-                            "train_start": train_start,
-                            "train_end": train_end,
-                            "level": f"Région_{region}",
-                            "forecast_years": forecast_years,
-                            "pred_annual": pred_annual,
-                            "pred_monthly": res["monthly_forecasts"],
-                            "run_parameters": res.get("run_parameters", {}),
-                            "actuals": actuals,
-                            "percent_errors": percent_errors,
-                        }
-                    )
-
-            if 2 in RUN_LEVELS:
                 print(f"\n{'#'*60}")
                 print(f"LEVEL 3: ACTIVITE")
                 print(f"{'#'*60}")
@@ -201,6 +333,7 @@ def run_ltf_cd_forecast(config_path="configs/ltf_cd.yaml", output_dir=None):
 
                     all_results.append(
                         {
+                            "activity": activite,
                             "train_start": train_start,
                             "train_end": train_end,
                             "level": f"Activité_{activite}",
