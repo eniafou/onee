@@ -215,7 +215,7 @@ def prepare_ca_output(df_prediction, df_contrats):
     
     return df_output
 
-def run_stf_cd_forecast(config_path="configs/stf_cd.yaml"):
+def run_stf_cd_forecast(config_path="configs/stf_cd.yaml", latest_year_in_data=None):
     """
     Execute STF CD forecast and return results
     
@@ -231,6 +231,10 @@ def run_stf_cd_forecast(config_path="configs/stf_cd.yaml"):
     try:
         # Load configuration
         config = ShortTermForecastConfig.from_yaml(config_path)
+
+        if latest_year_in_data is not None:
+            config.evaluation.eval_years_start = latest_year_in_data + 1
+            config.evaluation.eval_years_end = latest_year_in_data + 1
         
         # Convert to legacy ANALYSIS_CONFIG format
         ANALYSIS_CONFIG = config.to_analysis_config()
@@ -344,7 +348,7 @@ if __name__ == "__main__":
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # Run the forecast
-    result = run_stf_cd_forecast(config_path=config_path)
+    result = run_stf_cd_forecast(config_path=config_path, latest_year_in_data=2023)
     
     # If successful, save outputs to disk
     if result['status'] == 'success':

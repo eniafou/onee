@@ -3,6 +3,7 @@
 # ─────────────────────────────────────────────────────────────
 
 import os
+import run_stf_srm
 from short_term_forecast_strategies import (
     create_monthly_matrix,
 )
@@ -93,25 +94,24 @@ def prepare_ca_output(df_prediction, df_contrats):
     )
     contract_lookup = contract_info.set_index(Aliases.CONTRAT).to_dict('index')
     
-    # Prepare df_contrats subset for latest value lookups
-    contrats_subset = df_contrats[[
-        Aliases.CONTRAT, Aliases.ANNEE, Aliases.MOIS,
-        Aliases.CONSOMMATION_ZCONHC, Aliases.CONSOMMATION_ZCONHL, Aliases.CONSOMMATION_ZCONHP,
-        Aliases.PUISSANCE_FACTUREE, Aliases.NIVEAU_TENSION
-    ]].copy()
+    # Aggregate df_contrats by year (sum monthly values per contract per year)
+    contrats_yearly = df_contrats.groupby(
+        [Aliases.CONTRAT, Aliases.ANNEE], as_index=False
+    ).agg({
+        Aliases.CONSOMMATION_ZCONHC: 'sum',
+        Aliases.CONSOMMATION_ZCONHL: 'sum',
+        Aliases.CONSOMMATION_ZCONHP: 'sum',
+        Aliases.PUISSANCE_FACTUREE: 'sum',
+        Aliases.NIVEAU_TENSION: 'first',  # Take first value for niveau_tension
+    })
     
-    # Create a sort key for finding latest available data
-    contrats_subset["_year_month"] = (
-        contrats_subset[Aliases.ANNEE] * 12 + contrats_subset[Aliases.MOIS]
-    )
-    
-    # Sort by contrat and year_month descending to easily find latest
-    contrats_subset = contrats_subset.sort_values(
-        [Aliases.CONTRAT, "_year_month"], ascending=[True, False]
+    # Sort by contrat and year descending to easily find latest
+    contrats_yearly = contrats_yearly.sort_values(
+        [Aliases.CONTRAT, Aliases.ANNEE], ascending=[True, False]
     )
     
     # Group contrats data for faster lookup
-    contrats_grouped = contrats_subset.groupby(Aliases.CONTRAT)
+    contrats_grouped = contrats_yearly.groupby(Aliases.CONTRAT)
     
     records = []
     
@@ -120,9 +120,6 @@ def prepare_ca_output(df_prediction, df_contrats):
         activity = pred_row["Activity"]
         year = pred_row["Year"]
         total_consumption = pred_row["Consommation_Total"]
-        
-        # Target year_month for lookup (end of year = December)
-        target_ym = year * 12 + 12
         
         # Find all contracts for this activity that are still operating (move_out_year >= year)
         active_contracts = []
@@ -148,15 +145,16 @@ def prepare_ca_output(df_prediction, df_contrats):
             
             try:
                 contract_data = contrats_grouped.get_group(contrat)
-                available = contract_data[contract_data["_year_month"] <= target_ym]
+                # Find latest available year data (year <= target year)
+                available = contract_data[contract_data[Aliases.ANNEE] <= year]
                 
                 if not available.empty:
-                    latest = available.iloc[0]
+                    latest = available.iloc[0]  # First row is latest due to descending sort
                     pf_value = latest[Aliases.PUISSANCE_FACTUREE] or 0.0
                     nt = latest[Aliases.NIVEAU_TENSION]
                     niveau_tension = nt if nt else "HT"
                     
-                    # Calculate breakdown percentages
+                    # Calculate breakdown percentages from yearly aggregates
                     zconhc_hist = latest[Aliases.CONSOMMATION_ZCONHC] or 0.0
                     zconhl_hist = latest[Aliases.CONSOMMATION_ZCONHL] or 0.0
                     zconhp_hist = latest[Aliases.CONSOMMATION_ZCONHP] or 0.0
@@ -233,7 +231,7 @@ def prepare_ca_output(df_prediction, df_contrats):
 # MAIN EXECUTION
 # ─────────────────────────────────────────────────────────────
 
-def run_ltf_cd_forecast(config_path="configs/ltf_cd.yaml", output_dir=None):
+def run_ltf_cd_forecast(config_path="configs/ltf_cd.yaml",  latest_year_in_data=None, horizon=5, output_dir=None,):
     """
     Execute LTF CD forecast and return results
     
@@ -251,6 +249,13 @@ def run_ltf_cd_forecast(config_path="configs/ltf_cd.yaml", output_dir=None):
     try:
         # Load configuration from YAML
         config = LongTermForecastConfig.from_yaml(config_path)
+
+        if latest_year_in_data is not None:
+            config.temporal.forecast_runs[0] = (
+                config.temporal.forecast_runs[0][0],
+                latest_year_in_data
+            )
+            config.temporal.horizon = horizon if horizon is not None else config.temporal.horizon
         
         # Extract config values
         RUN_LEVELS = set(config.data.run_levels)
@@ -298,11 +303,11 @@ def run_ltf_cd_forecast(config_path="configs/ltf_cd.yaml", output_dir=None):
                         df_train, value_col=config.data.target_variable
                     )
                     years = np.sort(df_train[Aliases.ANNEE].unique())
-
                     df_activite_features = data_loader.compute_contract_features(df_contrats, entity_col=Aliases.ACTIVITE, end_year=train_end + config.temporal.horizon)
                     df_a = df_activite_features[df_activite_features[Aliases.ACTIVITE] == activite]
-                    df_a = df_a.merge(df_features, on=Aliases.ANNEE)
-     
+                    df_a = df_a.merge(df_features, on=Aliases.ANNEE, how="outer")
+                    print(df_a.tail())
+
                     res = run_long_horizon_forecast(
                         monthly_matrix=monthly_matrix,
                         years=years,
@@ -381,26 +386,31 @@ if __name__ == "__main__":
     output_dir.mkdir(parents=True, exist_ok=True)
     
     # Run the forecast with output_dir
-    result = run_ltf_cd_forecast(config_path=config_path, output_dir=output_dir)
-    
+    result = run_ltf_cd_forecast(config_path=config_path, output_dir=None, latest_year_in_data=2023)
+    df_prediction = prepare_prediction_output(result['results'])
+    data_loader = DataLoader(config.project.project_root)
+    df_contrats, _ = data_loader.load_cd_data(
+            db_path=config.project.project_root / config.data.db_path,)
+    final_df = prepare_ca_output(df_prediction, df_contrats)
+    final_df.to_csv("test_final_df.csv", index=False)
     # If successful, save outputs to disk
-    if result['status'] == 'success':
-        all_results = result['results']
+    # if result['status'] == 'success':
+    #     all_results = result['results']
         
-        # Save pickle file
-        with open(
-            output_dir / f"{config.data.target_variable}_{config.project.exp_name}.pkl",
-            "wb",
-        ) as f:
-            pickle.dump(all_results, f)
+    #     # Save pickle file
+    #     with open(
+    #         output_dir / f"{config.data.target_variable}_{config.project.exp_name}.pkl",
+    #         "wb",
+    #     ) as f:
+    #         pickle.dump(all_results, f)
         
-        # Create and save Excel summary
-        df_summary = create_summary_dataframe(all_results)
-        out_xlsx = (
-            output_dir / f"summary_{config.data.target_variable}_{config.project.exp_name}.xlsx"
-        )
-        df_summary.to_excel(out_xlsx, index=False)
-        print(f"\n📁 Saved horizon forecasts to {out_xlsx}")
+    #     # Create and save Excel summary
+    #     df_summary = create_summary_dataframe(all_results)
+    #     out_xlsx = (
+    #         output_dir / f"summary_{config.data.target_variable}_{config.project.exp_name}.xlsx"
+    #     )
+    #     df_summary.to_excel(out_xlsx, index=False)
+    #     print(f"\n📁 Saved horizon forecasts to {out_xlsx}")
     
     # Exit with appropriate code
     sys.exit(0 if result['status'] == 'success' else 1)

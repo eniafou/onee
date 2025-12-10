@@ -1314,11 +1314,12 @@ def strategy4_ultra_strict_loocv(
                 df_features,
                 clients_lookup=clients_lookup if use_clients else None,
                 use_clients=bool(use_clients and clients_lookup),
+                df_monthly=df_monthly,
                 use_pf=use_pf,
                 transforms=transforms_option,
                 lags=lags_option,
             )
-
+    
             if include_exog:
                 if test_features is None or test_features.shape[1] != feature_dim:
                     test_features_array = np.zeros((1, feature_dim), dtype=float)
@@ -1583,7 +1584,7 @@ def run_analysis_for_entity(
         pca_lambdas=PCA_LAMBDAS,
         training_end=training_end,
     )
-
+    
     s4_results = strategy4_ultra_strict_loocv(
         monthly_matrix=monthly_matrix,
         years=years,

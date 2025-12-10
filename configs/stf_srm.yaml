@@ -17,7 +17,7 @@ data:
   unit: Kwh
   # regions dict: key=region_name, value=run_level_mode
   # 0: Total SRM only
-  # 1: Both Individual Activities and Total SRM (level 7)
+  # 1: Both Individual Activities and Total SRM
   regions:
     Casablanca-Settat: 0
     Béni Mellal-Khénifra: 0

@@ -86,12 +86,13 @@ def prepare_prediction_output(all_results_by_region):
     return df
 
 
-def run_stf_srm_forecast(config_path="configs/stf_srm.yaml", use_output_dir=False):
+def run_stf_srm_forecast(config, data_by_region, use_output_dir=False):
     """
     Execute STF SRM forecast and return results
     
     Args:
-        config_path: Path to YAML configuration file
+        config: ShortTermForecastConfig object (already configured)
+        data_by_region: Dict mapping region names to tuples of (df_regional, df_features, df_dist, var_cols)
         use_output_dir: Boolean to control output directory usage. If True, creates and uses output_dir. If False, passes None.
         
     Returns:
@@ -101,9 +102,6 @@ def run_stf_srm_forecast(config_path="configs/stf_srm.yaml", use_output_dir=Fals
             - error: Error message if status is 'error'
     """
     try:
-        # Load configuration
-        config = ShortTermForecastConfig.from_yaml(config_path)
-        
         # Convert to legacy ANALYSIS_CONFIG format
         ANALYSIS_CONFIG = config.to_analysis_config()
         
@@ -114,7 +112,7 @@ def run_stf_srm_forecast(config_path="configs/stf_srm.yaml", use_output_dir=Fals
         exp_name = config.project.exp_name
         use_monthly_clients_options = config.features.use_monthly_clients_options
         
-        # Initialize DataLoader
+        # Initialize DataLoader for client predictions
         data_loader = DataLoader(PROJECT_ROOT)
         
         all_results_by_region = {}
@@ -130,14 +128,10 @@ def run_stf_srm_forecast(config_path="configs/stf_srm.yaml", use_output_dir=Fals
             else:
                 RUN_LEVELS = set(config.data.run_levels)
           
-            print(f"Loading data for {TARGET_REGION}...\n")
+            print(f"Processing data for {TARGET_REGION}...\n")
 
-            # Load data using DataLoader
-            df_regional, df_features, df_dist, var_cols = data_loader.load_srm_data(
-                db_path=config.project.project_root / config.data.db_path,
-                variable=VARIABLE,
-                target_region=TARGET_REGION,
-            )
+            # Get pre-loaded data for this region
+            df_regional, df_features, df_dist, var_cols = data_by_region[TARGET_REGION]
             reg_var_col = var_cols["regional"]
 
             print(f"\n{'#'*60}")
@@ -254,12 +248,32 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         config_path = sys.argv[1]
     
-    # Reload config to create output directories
+    # Load configuration
     config = ShortTermForecastConfig.from_yaml(config_path)
+    
+    # Override eval years if needed (e.g., latest_year_in_data=2023)
+    latest_year_in_data = 2023
+    if latest_year_in_data is not None:
+        config.evaluation.eval_years_start = latest_year_in_data + 1
+        config.evaluation.eval_years_end = latest_year_in_data + 1
+    
     PROJECT_ROOT = config.project.project_root
     VARIABLE = config.data.variable
     REGIONS = config.data.regions
     exp_name = config.project.exp_name
+    
+    # Initialize DataLoader and load data for all regions
+    data_loader = DataLoader(PROJECT_ROOT)
+    data_by_region = {}
+    
+    for TARGET_REGION in REGIONS.keys():
+        print(f"Loading data for {TARGET_REGION}...")
+        df_regional, df_features, df_dist, var_cols = data_loader.load_srm_data(
+            db_path=config.project.project_root / config.data.db_path,
+            variable=VARIABLE,
+            target_region=TARGET_REGION,
+        )
+        data_by_region[TARGET_REGION] = (df_regional, df_features, df_dist, var_cols)
     
     # Create output directories for each region
     output_dirs = {}
@@ -268,9 +282,10 @@ if __name__ == "__main__":
         output_dir.mkdir(parents=True, exist_ok=True)
         output_dirs[TARGET_REGION] = output_dir
     
-    # Run the forecast
-    result = run_stf_srm_forecast(config_path=config_path, use_output_dir=True)
-    
+    # Run the forecast with pre-loaded config and data
+    result = run_stf_srm_forecast(config=config, data_by_region=data_by_region, use_output_dir=True)
+    df_prediction = prepare_prediction_output(result['results'])
+    df_prediction.to_csv(PROJECT_ROOT / "stf_srm.csv", index=False)
     # If successful, save outputs to disk
     if result['status'] == 'success':
         all_results_by_region = result['results']

@@ -195,7 +195,7 @@ def build_growth_rate_features(
         feature_array = add_annual_client_feature(
             feature_array, years_list, clients_lookup
         )
-    
+
     if use_pf:
         feature_array = add_yearly_feature(
             feature_array, years_list, df_monthly, feature=Aliases.PUISSANCE_FACTUREE, agg_method="sum"

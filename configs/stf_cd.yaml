@@ -28,7 +28,7 @@ data:
 evaluation:
   eval_years_start: 2021
   eval_years_end: 2023
-  train_start_year: 2007
+  train_start_year: 2013
   training_end: null
 
 # ───────────────────────────────────────────────────────────────────────

@@ -24,26 +24,27 @@ warnings.filterwarnings("ignore")
 # ─────────────────────────────────────────────────────────────
 # HELPER FUNCTIONS
 # ─────────────────────────────────────────────────────────────
-def prepare_prediction_output(all_results):
+def prepare_prediction_output(all_results_by_region):
     """
     Create a simple summary DataFrame with Region, Year, and Predicted_Annual
     
     Args:
-        all_results: List of forecast result dictionaries
+        all_results_by_region: Dict mapping region names to list of forecast result dictionaries
         
     Returns:
         pandas DataFrame with Region, Year, and Predicted_Annual columns
     """
     df_summary_records = []
-    for r in all_results:
-        for y, v in zip(r["forecast_years"], r["pred_annual"]):
-            df_summary_records.append(
-                {
-                    "Region": r.get("region"),
-                    "Year": y,
-                    "Consommation": v
-                }
-            )
+    for region_name, results_list in all_results_by_region.items():
+        for r in results_list:
+            for y, v in zip(r["forecast_years"], r["pred_annual"]):
+                df_summary_records.append(
+                    {
+                        "Region": r.get("region", region_name),
+                        "Year": y,
+                        "Consommation": v
+                    }
+                )
     
     return pd.DataFrame(df_summary_records)
 
@@ -52,7 +53,7 @@ def prepare_prediction_output(all_results):
 # ─────────────────────────────────────────────────────────────
 # MAIN EXECUTION
 # ─────────────────────────────────────────────────────────────
-def run_ltf_srm_forecast(config_path="configs/ltf_srm.yaml", use_output_dir=False):
+def run_ltf_srm_forecast(config_path="configs/ltf_srm.yaml", use_output_dir=False, latest_year_in_data=None, horizon = 5):
     """
     Execute LTF SRM forecast and return results
     
@@ -69,6 +70,13 @@ def run_ltf_srm_forecast(config_path="configs/ltf_srm.yaml", use_output_dir=Fals
     try:
         # Load configuration from YAML
         config = LongTermForecastConfig.from_yaml(config_path)
+
+        if latest_year_in_data is not None:
+            config.temporal.forecast_runs[0] = (
+                config.temporal.forecast_runs[0][0],
+                latest_year_in_data
+            )
+            config.temporal.horizon = horizon if horizon is not None else config.temporal.horizon
         
         # Extract config values
         REGIONS = config.data.regions
@@ -147,11 +155,10 @@ def run_ltf_srm_forecast(config_path="configs/ltf_srm.yaml", use_output_dir=Fals
                             .agg({config.data.target_variable: "sum"})
                             .reset_index()
                         )
-
+                        df_srm = df_srm[df_srm[Aliases.ANNEE] >= train_start]
                         if config.data.impute_2020:
                             df_srm = fill_2020_with_avg(df_srm, config.data.target_variable)
 
-                        df_srm = df_srm[df_srm[Aliases.ANNEE] >= 2013]
                         df_train = df_srm[df_srm[Aliases.ANNEE] <= train_end]
                         monthly_matrix = create_monthly_matrix(
                             df_train, value_col=config.data.target_variable
@@ -311,29 +318,31 @@ if __name__ == "__main__":
         output_dirs[TARGET_REGION] = output_dir
     
     # Run the forecast with use_output_dir=True
-    result = run_ltf_srm_forecast(config_path=config_path, use_output_dir=True)
+    result = run_ltf_srm_forecast(config_path=config_path, use_output_dir=False, latest_year_in_data=2023, horizon=5)
+    df_prediction = prepare_prediction_output(result['results'])
+    df_prediction.to_csv("ltf_srm.csv", index=False)
     
     # If successful, save outputs to disk
-    if result['status'] == 'success':
-        all_results_by_region = result['results']
+    # if result['status'] == 'success':
+    #     all_results_by_region = result['results']
         
-        for TARGET_REGION, all_results in all_results_by_region.items():
-            output_dir = output_dirs[TARGET_REGION]
+    #     for TARGET_REGION, all_results in all_results_by_region.items():
+    #         output_dir = output_dirs[TARGET_REGION]
             
-            # Save pickle file
-            with open(
-                output_dir / f"{clean_name(TARGET_REGION)}_{config.data.target_variable}_{config.project.exp_name}.pkl",
-                "wb",
-            ) as f:
-                pickle.dump(all_results, f)
+    #         # Save pickle file
+    #         with open(
+    #             output_dir / f"{clean_name(TARGET_REGION)}_{config.data.target_variable}_{config.project.exp_name}.pkl",
+    #             "wb",
+    #         ) as f:
+    #             pickle.dump(all_results, f)
             
-            # Create and save Excel summary
-            df_summary = create_summary_dataframe(all_results)
-            out_xlsx = (
-                output_dir / f"summary_{clean_name(TARGET_REGION)}_{config.data.target_variable}_{config.project.exp_name}.xlsx"
-            )
-            df_summary.to_excel(out_xlsx, index=False)
-            print(f"\n📁 Saved horizon forecasts to {out_xlsx}")
+    #         # Create and save Excel summary
+    #         df_summary = create_summary_dataframe(all_results)
+    #         out_xlsx = (
+    #             output_dir / f"summary_{clean_name(TARGET_REGION)}_{config.data.target_variable}_{config.project.exp_name}.xlsx"
+    #         )
+    #         df_summary.to_excel(out_xlsx, index=False)
+    #         print(f"\n📁 Saved horizon forecasts to {out_xlsx}")
     
     # Exit with appropriate code
     sys.exit(0 if result['status'] == 'success' else 1)
