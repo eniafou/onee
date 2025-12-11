@@ -6,23 +6,16 @@ from onee.data.loader import DataLoader
 from run_stf_srm import run_stf_srm_forecast, prepare_prediction_output as prepare_prediction_output_stf
 from run_ltf_srm import run_ltf_srm_forecast, prepare_prediction_output as prepare_prediction_output_ltf
 from onee.data.names import Aliases
-
-
-def get_latest_year_status(df: pd.DataFrame) -> tuple[int | None, int | None]:
-    """
-    Get the latest year and month from the DataFrame.
-    
-    Args:
-        df: DataFrame with Annee and Mois columns
-        
-    Returns:
-        Tuple of (latest_year, latest_month) or (None, None) if DataFrame is empty
-    """
-    if df is None or df.empty:
-        return None, None
-    latest_year = df[Aliases.ANNEE].max()
-    latest_month = df[df[Aliases.ANNEE] == latest_year][Aliases.MOIS].max()
-    return latest_year, latest_month
+# ...existing imports...
+from full_forecast_utils import (
+    get_latest_year_status,
+    extrapolate_features,
+    configure_stf_for_year,
+    configure_ltf_for_year,
+    rename_to_ltf_srm_results,
+    rename_to_stf_srm_results,
+    apply_consumption_adjustment
+)
 
 
 def compute_df_srm(df_regional: pd.DataFrame, df_dist: pd.DataFrame | None, 
@@ -137,23 +130,82 @@ def append_forecast(df_forecast: pd.DataFrame, df_srm: pd.DataFrame,
     return df_srm, df_regional
 
 
-def correct_prediction_with_existant(df_forecast: pd.DataFrame, df_existant: pd.DataFrame, 
-                                     target_variable: str) -> pd.DataFrame:
+def correct_prediction_with_existant_srm(df_forecast: pd.DataFrame, df_existant: pd.DataFrame, 
+                                         target_variable: str) -> pd.DataFrame:
     """
-    Correct forecast predictions using existing data.
+    Correct SRM forecast predictions using existing data.
     
-    TODO: Implement correction logic if needed (currently returns unchanged forecast).
+    For each activity in a region, compares the initial predictions with realized consumption
+    and applies an adjustment factor to future predictions.
     
     Args:
-        df_forecast: DataFrame with forecast predictions
-        df_existant: DataFrame with existing data to use for correction
-        target_variable: Name of the target variable column
+        df_forecast: DataFrame with forecast predictions (STF SRM results format)
+        df_existant: DataFrame with existing regional data (without Region column)
+        target_variable: Name of the target variable column (should be Aliases.CONSOMMATION_KWH)
         
     Returns:
-        Corrected forecast DataFrame
+        Corrected forecast DataFrame with adjusted consumption values
     """
-    return df_forecast
-
+    # Make a copy to avoid modifying the original
+    df_corrected = df_forecast.copy()
+    
+    # Get unique activities from forecast
+    activity_groups = df_corrected.groupby([Aliases.ACTIVITE])
+    
+    for activite, group_forecast in activity_groups:
+        # Filter existing data for this specific activity
+        mask_existant = (df_existant[Aliases.ACTIVITE] == activite)
+        df_activity_existant = df_existant[mask_existant].copy()
+        
+        if df_activity_existant.empty:
+            # No existing data for this activity, skip correction
+            continue
+        
+        # Get the forecast year (assuming all rows in group have same year)
+        forecast_year = group_forecast[Aliases.ANNEE].iloc[0]
+        
+        # Filter existing data for the forecast year
+        df_year_existant = df_activity_existant[
+            df_activity_existant[Aliases.ANNEE] == forecast_year
+        ].copy()
+        
+        if df_year_existant.empty:
+            # No existing data for this year, skip correction
+            continue
+        
+        # Sort both dataframes by month
+        group_forecast_sorted = group_forecast.sort_values(Aliases.MOIS)
+        df_year_existant_sorted = df_year_existant.sort_values(Aliases.MOIS)
+        
+        # Get the 12 months of initial predictions
+        prediction_consomation_initiale = group_forecast_sorted[target_variable].tolist()
+        
+        # Ensure we have exactly 12 predictions
+        if len(prediction_consomation_initiale) != 12:
+            continue
+        
+        # Get realized consumption (only available months)
+        consommation_realise = df_year_existant_sorted[target_variable].tolist()
+        
+        # Apply the adjustment
+        try:
+            correction_prediction = apply_consumption_adjustment(
+                prediction_consomation_initiale, 
+                consommation_realise
+            )
+        except (ValueError, ZeroDivisionError):
+            # Skip correction if there's an error
+            continue
+        
+        # Update the corrected dataframe with new values
+        indices = group_forecast_sorted.index
+        for i, idx in enumerate(indices):
+            corrected_total = correction_prediction[i]
+            
+            # Update total consumption
+            df_corrected.loc[idx, target_variable] = corrected_total
+    
+    return df_corrected
 
 def _run_stf_forecast(config_stf: ShortTermForecastConfig, target_region: str, 
                       region_mode: int, df_regional: pd.DataFrame, 
@@ -240,7 +292,7 @@ def _process_ltf_result(result: dict, target_region: str) -> pd.DataFrame | None
     return None
 
 
-def _configure_stf_for_year(config_stf: ShortTermForecastConfig, year: int) -> None:
+def configure_stf_for_year(config_stf: ShortTermForecastConfig, year: int) -> None:
     """
     Configure STF config for a specific evaluation year.
     
@@ -252,7 +304,7 @@ def _configure_stf_for_year(config_stf: ShortTermForecastConfig, year: int) -> N
     config_stf.evaluation.eval_years_end = year
 
 
-def _configure_ltf_for_year(config_ltf: LongTermForecastConfig, latest_year: int) -> None:
+def configure_ltf_for_year(config_ltf: LongTermForecastConfig, latest_year: int) -> None:
     """
     Configure LTF config to use latest_year as the base year for forecasting.
     
@@ -288,14 +340,14 @@ def _process_complete_year(config_stf: ShortTermForecastConfig,
         Tuple of (STF result DataFrame, LTF result DataFrame)
     """
     # Configure and run STF for next year
-    _configure_stf_for_year(config_stf, latest_year + 1)
+    configure_stf_for_year(config_stf, latest_year + 1)
     stf_result = _run_stf_forecast(
         config_stf, target_region, region_mode, df_regional, df_features, df_srm
     )
     df_stf = _process_stf_result(stf_result, target_region)
     
     # Configure and run LTF
-    _configure_ltf_for_year(config_ltf, latest_year)
+    configure_ltf_for_year(config_ltf, latest_year)
     ltf_result = _run_ltf_forecast(
         config_ltf, target_region, df_regional, df_features, df_srm
     )
@@ -333,7 +385,7 @@ def _process_incomplete_year(config_stf: ShortTermForecastConfig,
         Tuple of (STF result DataFrame, LTF result DataFrame)
     """
     # Step 1: Complete current year forecast
-    _configure_stf_for_year(config_stf, latest_year)
+    configure_stf_for_year(config_stf, latest_year)
     result_current_year = _run_stf_forecast(
         config_stf, target_region, region_mode, df_regional, df_features, df_srm
     )
@@ -356,7 +408,7 @@ def _process_incomplete_year(config_stf: ShortTermForecastConfig,
     )
 
     # Step 2: Forecast next year
-    _configure_stf_for_year(config_stf, latest_year + 1)
+    configure_stf_for_year(config_stf, latest_year + 1)
     result_next_year = _run_stf_forecast(
         config_stf, target_region, region_mode, df_regional_updated, df_features, df_srm_updated
     )
@@ -372,7 +424,7 @@ def _process_incomplete_year(config_stf: ShortTermForecastConfig,
     df_stf_combined = pd.concat([df_current_remaining, df_result_next], axis=0, ignore_index=True)
     
     # Run LTF forecast
-    _configure_ltf_for_year(config_ltf, latest_year)
+    configure_ltf_for_year(config_ltf, latest_year)
     ltf_result = _run_ltf_forecast(
         config_ltf, target_region, df_regional_updated, df_features, df_srm_updated
     )
@@ -475,7 +527,7 @@ def run_full_forecast_srm(regions_override: dict | None = None) -> tuple[pd.Data
     df_results_stf = pd.concat(all_results_stf, axis=0, ignore_index=True) if all_results_stf else pd.DataFrame()
     df_results_ltf = pd.concat(all_results_ltf, axis=0, ignore_index=True) if all_results_ltf else pd.DataFrame()
     
-    return df_results_stf, df_results_ltf
+    return rename_to_stf_srm_results(df_results_stf), rename_to_ltf_srm_results(df_results_ltf)
 
 if __name__ == "__main__":
     df_stf, df_ltf = run_full_forecast_srm()

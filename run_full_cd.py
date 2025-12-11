@@ -6,23 +6,17 @@ from onee.data.loader import DataLoader
 from run_stf_cd import run_stf_cd_forecast, prepare_prediction_output as prepare_prediction_output_stf, prepare_ca_output as prepare_ca_output_stf
 from run_ltf_cd import run_ltf_cd_forecast, prepare_prediction_output as prepare_prediction_output_ltf, prepare_ca_output as prepare_ca_output_ltf
 from onee.data.names import Aliases
+import numpy as np
 
-
-def get_latest_year_status(df: pd.DataFrame) -> tuple[int | None, int | None]:
-    """
-    Get the latest year and month from the DataFrame.
-    
-    Args:
-        df: DataFrame with Annee and Mois columns
-        
-    Returns:
-        Tuple of (latest_year, latest_month) or (None, None) if DataFrame is empty
-    """
-    if df is None or df.empty:
-        return None, None
-    latest_year = df[Aliases.ANNEE].max()
-    latest_month = df[df[Aliases.ANNEE] == latest_year][Aliases.MOIS].max()
-    return latest_year, latest_month
+from full_forecast_utils import (
+    get_latest_year_status,
+    extrapolate_features,
+    configure_stf_for_year,
+    configure_ltf_for_year,
+    rename_to_ltf_cd_results,
+    rename_to_stf_cd_results,
+    apply_consumption_adjustment
+)
 
 def append_forecast(df_forecast: pd.DataFrame, df_contrats: pd.DataFrame, 
                     target_variable: str) -> pd.DataFrame:
@@ -94,6 +88,104 @@ def correct_prediction_with_existant(df_forecast: pd.DataFrame, df_existant: pd.
     """
     return df_forecast
 
+
+def correct_prediction_with_existant(df_forecast: pd.DataFrame, df_existant: pd.DataFrame, 
+                                     target_variable: str) -> pd.DataFrame:
+    """
+    Correct forecast predictions using existing data.
+    
+    For each contract, compares the initial predictions with realized consumption
+    and applies an adjustment factor to future predictions.
+    
+    Args:
+        df_forecast: DataFrame with forecast predictions (STF CD results format)
+        df_existant: DataFrame with existing contract data from CD table
+        target_variable: Name of the target variable column (should be Aliases.CONSOMMATION_KWH)
+        
+    Returns:
+        Corrected forecast DataFrame with adjusted consumption values
+    """
+    # Make a copy to avoid modifying the original
+    df_corrected = df_forecast.copy()
+    
+    # Get unique contracts from forecast
+    contract_groups = df_corrected.groupby([Aliases.REGION, Aliases.PARTENAIRE, Aliases.CONTRAT])
+    
+    for (region, partenaire, contrat), group_forecast in contract_groups:
+        # Filter existing data for this specific contract
+        mask_existant = (
+            (df_existant[Aliases.REGION] == region) &
+            (df_existant[Aliases.PARTENAIRE] == partenaire) &
+            (df_existant[Aliases.CONTRAT] == contrat)
+        )
+        df_contract_existant = df_existant[mask_existant].copy()
+        
+        if df_contract_existant.empty:
+            # No existing data for this contract, skip correction
+            continue
+        
+        # Get the forecast year (assuming all rows in group have same year)
+        forecast_year = group_forecast[Aliases.ANNEE].iloc[0]
+        
+        # Filter existing data for the forecast year
+        df_year_existant = df_contract_existant[
+            df_contract_existant[Aliases.ANNEE] == forecast_year
+        ].copy()
+        
+        if df_year_existant.empty:
+            # No existing data for this year, skip correction
+            continue
+        
+        # Sort both dataframes by month
+        group_forecast_sorted = group_forecast.sort_values(Aliases.MOIS)
+        df_year_existant_sorted = df_year_existant.sort_values(Aliases.MOIS)
+        
+        # Get the 12 months of initial predictions
+        prediction_consomation_initiale = group_forecast_sorted[target_variable].tolist()
+        
+        # Ensure we have exactly 12 predictions
+        if len(prediction_consomation_initiale) != 12:
+            continue
+        
+        # Get realized consumption (only available months)
+        consommation_realise = df_year_existant_sorted[target_variable].tolist()
+        
+        # Apply the adjustment
+        try:
+            correction_prediction = apply_consumption_adjustment(
+                prediction_consomation_initiale, 
+                consommation_realise
+            )
+        except (ValueError, ZeroDivisionError):
+            # Skip correction if there's an error
+            continue
+        
+        # Calculate the proportions of ZCONHC, ZCONHL, ZCONHP from initial forecast
+        # to maintain the same distribution in corrected values
+        total_initial = group_forecast_sorted[target_variable].values
+        zconhc_initial = group_forecast_sorted[Aliases.CONSOMMATION_ZCONHC].values
+        zconhl_initial = group_forecast_sorted[Aliases.CONSOMMATION_ZCONHL].values
+        zconhp_initial = group_forecast_sorted[Aliases.CONSOMMATION_ZCONHP].values
+        
+        # Calculate proportions (avoid division by zero)
+        prop_zconhc = np.where(total_initial > 0, zconhc_initial / total_initial, 0)
+        prop_zconhl = np.where(total_initial > 0, zconhl_initial / total_initial, 0)
+        prop_zconhp = np.where(total_initial > 0, zconhp_initial / total_initial, 0)
+        
+        # Update the corrected dataframe with new values
+        indices = group_forecast_sorted.index
+        for i, idx in enumerate(indices):
+            corrected_total = correction_prediction[i]
+            
+            # Update total consumption
+            df_corrected.loc[idx, target_variable] = corrected_total
+            
+            # Recalculate ZCON values maintaining proportions
+            df_corrected.loc[idx, Aliases.CONSOMMATION_ZCONHC] = corrected_total * prop_zconhc[i]
+            df_corrected.loc[idx, Aliases.CONSOMMATION_ZCONHL] = corrected_total * prop_zconhl[i]
+            df_corrected.loc[idx, Aliases.CONSOMMATION_ZCONHP] = corrected_total * prop_zconhp[i]
+    
+    return df_corrected
 
 def _run_stf_forecast(config_stf: ShortTermForecastConfig, 
                       df_contrats: pd.DataFrame, 
@@ -172,32 +264,6 @@ def _process_ltf_result(result: dict, df_contrats: pd.DataFrame) -> pd.DataFrame
     return None
 
 
-def _configure_stf_for_year(config_stf: ShortTermForecastConfig, year: int) -> None:
-    """
-    Configure STF config for a specific evaluation year.
-    
-    Args:
-        config_stf: STF config to modify (in-place)
-        year: The year to set for evaluation
-    """
-    config_stf.evaluation.eval_years_start = year
-    config_stf.evaluation.eval_years_end = year
-
-
-def _configure_ltf_for_year(config_ltf: LongTermForecastConfig, latest_year: int) -> None:
-    """
-    Configure LTF config to use latest_year as the base year for forecasting.
-    
-    Args:
-        config_ltf: LTF config to modify (in-place)
-        latest_year: The latest year of data to use as base
-    """
-    config_ltf.temporal.forecast_runs[0] = (
-        config_ltf.temporal.forecast_runs[0][0],
-        latest_year
-    )
-
-
 def _process_complete_year(config_stf: ShortTermForecastConfig, 
                            config_ltf: LongTermForecastConfig,
                            df_contrats: pd.DataFrame, 
@@ -217,12 +283,12 @@ def _process_complete_year(config_stf: ShortTermForecastConfig,
         Tuple of (STF result DataFrame, LTF result DataFrame)
     """
     # Configure and run STF for next year
-    _configure_stf_for_year(config_stf, latest_year + 1)
+    configure_stf_for_year(config_stf, latest_year + 1)
     stf_result = _run_stf_forecast(config_stf, df_contrats, df_features)
     df_stf = _process_stf_result(stf_result, df_contrats)
     
     # Configure and run LTF
-    _configure_ltf_for_year(config_ltf, latest_year)
+    configure_ltf_for_year(config_ltf, latest_year)
     ltf_result = _run_ltf_forecast(config_ltf, df_contrats, df_features)
     df_ltf = _process_ltf_result(ltf_result, df_contrats)
     
@@ -256,7 +322,7 @@ def _process_incomplete_year(config_stf: ShortTermForecastConfig,
         Tuple of (STF result DataFrame, LTF result DataFrame)
     """
     # Step 1: Complete current year forecast
-    _configure_stf_for_year(config_stf, latest_year)
+    configure_stf_for_year(config_stf, latest_year)
     result_current_year = _run_stf_forecast(config_stf, df_contrats, df_features)
     
     if result_current_year.get('status') != 'success':
@@ -274,7 +340,7 @@ def _process_incomplete_year(config_stf: ShortTermForecastConfig,
     df_contrats_updated = append_forecast(df_result_current, df_contrats, target_variable)
     
     # Step 2: Forecast next year
-    _configure_stf_for_year(config_stf, latest_year + 1)
+    configure_stf_for_year(config_stf, latest_year + 1)
     result_next_year = _run_stf_forecast(config_stf, df_contrats_updated, df_features)
     
     if result_next_year.get('status') != 'success':
@@ -290,48 +356,11 @@ def _process_incomplete_year(config_stf: ShortTermForecastConfig,
     df_stf_combined = pd.concat([df_current_remaining, df_result_next], axis=0, ignore_index=True)
     
     # Run LTF forecast
-    _configure_ltf_for_year(config_ltf, latest_year)
+    configure_ltf_for_year(config_ltf, latest_year)
     ltf_result = _run_ltf_forecast(config_ltf, df_contrats_updated, df_features)
     df_ltf = _process_ltf_result(ltf_result, df_contrats_updated)
     
     return df_stf_combined, df_ltf
-
-
-def extrapolate_features(df_features: pd.DataFrame, latest_year: int) -> pd.DataFrame:
-    """
-    Extrapolate features to cover the latest_year if needed.
-    
-    Args:
-        df_features: Features DataFrame
-        latest_year: The year to extrapolate to
-        
-    Returns:
-        Updated features DataFrame with extrapolated values
-    """
-    if latest_year in df_features[Aliases.ANNEE].values:
-        return df_features 
-    
-    df_features = df_features.sort_values(by=Aliases.ANNEE)
-    last_year = df_features[Aliases.ANNEE].max()
-    years_to_add = latest_year - last_year
-    df_to_append = df_features[df_features[Aliases.ANNEE] == last_year].copy()
-    
-    for year in range(1, years_to_add + 1):
-        new_year = last_year + year
-        df_new = df_to_append.copy()
-        df_new[Aliases.ANNEE] = new_year
-        
-        for col in df_features.columns:
-            if col != Aliases.ANNEE and pd.api.types.is_numeric_dtype(df_features[col]):
-                prev_val = df_features[df_features[Aliases.ANNEE] == last_year - 1][col].values[0]
-                curr_val = df_features[df_features[Aliases.ANNEE] == last_year][col].values[0]
-                if prev_val != 0:
-                    growth_rate = (curr_val - prev_val) / prev_val
-                    df_new[col] = df_new[col] * (1 + growth_rate)
-        
-        df_features = pd.concat([df_features, df_new], ignore_index=True)
-    
-    return df_features
 
 
 def run_full_forecast_cd() -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -391,7 +420,7 @@ def run_full_forecast_cd() -> tuple[pd.DataFrame, pd.DataFrame]:
     df_results_stf = df_stf if df_stf is not None else pd.DataFrame()
     df_results_ltf = df_ltf if df_ltf is not None else pd.DataFrame()
     
-    return df_results_stf, df_results_ltf
+    return rename_to_stf_cd_results(df_results_stf), rename_to_ltf_cd_results(df_results_ltf)
 
 
 if __name__ == "__main__":

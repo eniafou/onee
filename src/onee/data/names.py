@@ -19,6 +19,11 @@ class Tables:
     CD = "CD"
     ACTIVE_CONTRATS_FEATURES = "Active_Contrats_Features"
 
+    STF_SRM_RESULTS = "STF_SRM_Results"
+    STF_CD_RESULTS = "STF_CD_Results"
+    LTF_SRM_RESULTS = "LTF_SRM_Results"
+    LTF_CD_RESULTS = "LTF_CD_Results"
+
 
 # ============================================================================
 # Column Names - GRD Table
@@ -53,7 +58,6 @@ class ExogenousColumns:
 # ============================================================================
 # Column Names - CD (Contracts) Table
 # ============================================================================
-
 class CDColumns:
     """Column names for CD table."""
     REGION = "Region"
@@ -71,6 +75,65 @@ class CDColumns:
     DATE_EMMENAGEMENT = "Date_emmenagement"
     DATE_DEMENAGEMENT = "Date_demenagement"
     NIVEAU_TENSION = "Niveau_de_tension"
+
+# ============================================================================
+# Column Names - STF SRM Results Table
+# ============================================================================
+class STFSRMResultsColumns:
+    """Column names for STF_SRM_Results output table."""
+    REGION = "Region"
+    ACTIVITY = "Activity"
+    YEAR = "Year"
+    MONTH = "Month"
+    CONSOMMATION = "Consommation"
+
+
+# ============================================================================
+# Column Names - STF CD Results Table
+# ============================================================================
+class STFCDResultsColumns:
+    """Column names for STF_CD_Results output table."""
+    REGION = "Region"
+    PARTENAIRE = "Partenaire"
+    CONTRAT = "Contrat"
+    ACTIVITY = "Activity"
+    YEAR = "Year"
+    MONTH = "Month"
+    CONSOMMATION_TOTAL = "Consommation_Total"
+    CONSOMMATION_ZCONHC = "Consommation_ZCONHC"
+    CONSOMMATION_ZCONHL = "Consommation_ZCONHL"
+    CONSOMMATION_ZCONHP = "Consommation_ZCONHP"
+    PUISSANCE_FACTUREE = "Puissance_Facturee"
+    NIVEAU_TENSION = "Niveau_tension"
+
+
+# ============================================================================
+# Column Names - LTF SRM Results Table
+# ============================================================================
+class LTFSRMResultsColumns:
+    """Column names for LTF_SRM_Results output table."""
+    REGION = "Region"
+    YEAR = "Year"
+    CONSOMMATION = "Consommation"
+
+
+# ============================================================================
+# Column Names - LTF CD Results Table
+# ============================================================================
+class LTFCDResultsColumns:
+    """Column names for LTF_CD_Results output table."""
+    REGION = "Region"
+    PARTENAIRE = "Partenaire"
+    CONTRAT = "Contrat"
+    ACTIVITY = "Activity"
+    YEAR = "Year"
+    CONSOMMATION_TOTAL = "Consommation_Total"
+    CONSOMMATION_ZCONHC = "Consommation_ZCONHC"
+    CONSOMMATION_ZCONHL = "Consommation_ZCONHL"
+    CONSOMMATION_ZCONHP = "Consommation_ZCONHP"
+    PUISSANCE_FACTUREE = "Puissance_Facturee"
+    NIVEAU_TENSION = "Niveau_tension"
+
 
 # ============================================================================
 # SQL Query Aliases (used throughout codebase)
