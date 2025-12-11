@@ -81,26 +81,26 @@ def prepare_prediction_output(all_results, df_contrats):
                     continue
                 
                 records.append({
-                    "Region": region,
-                    "Partenaire": partenaire,
-                    "Contrat": contrat,
-                    "Activity": activite,
-                    "Year": year,
-                    "Month": int(month),
-                    "Consommation_Total": predicted,
+                    Aliases.REGION: region,
+                    Aliases.PARTENAIRE: partenaire,
+                    Aliases.CONTRAT: contrat,
+                    Aliases.ACTIVITE: activite,
+                    Aliases.ANNEE: year,
+                    Aliases.MOIS: int(month),
+                    Aliases.CONSOMMATION_KWH: predicted,
                 })
     
     if not records:
         return pd.DataFrame(columns=[
-            "Region", "Partenaire", "Contrat", "Activity", 
-            "Year", "Month", "Consommation_Total"
+            Aliases.REGION, Aliases.PARTENAIRE, Aliases.CONTRAT, Aliases.ACTIVITE, 
+            Aliases.ANNEE, Aliases.MOIS, Aliases.CONSOMMATION_KWH
         ])
     
     df = pd.DataFrame(records)
     
     # Sort for better readability
     df = df.sort_values(
-        ["Region", "Partenaire", "Contrat", "Activity", "Year", "Month"]
+        [Aliases.REGION, Aliases.PARTENAIRE, Aliases.CONTRAT, Aliases.ACTIVITE, Aliases.ANNEE, Aliases.MOIS]
     ).reset_index(drop=True)
     
     return df
@@ -123,11 +123,6 @@ def prepare_ca_output(df_prediction, df_contrats):
                                       Puissance_Facturee, Niveau_tension
     """
     
-    # Column names for the breakdown
-    ZCONHC = "Consommation_ZCONHC"
-    ZCONHL = "Consommation_ZCONHL"
-    ZCONHP = "Consommation_ZCONHP"
-    
     # Prepare df_contrats with required columns for consumption breakdown
     contrats_subset = df_contrats[[
         Aliases.CONTRAT, Aliases.ANNEE, Aliases.MOIS,
@@ -147,50 +142,50 @@ def prepare_ca_output(df_prediction, df_contrats):
     
     # Initialize new columns
     df_output = df_prediction.copy()
-    df_output[ZCONHC] = None
-    df_output[ZCONHL] = None
-    df_output[ZCONHP] = None
-    df_output["Puissance_Facturee"] = None
-    df_output["Niveau_tension"] = None
+    df_output[Aliases.CONSOMMATION_ZCONHC] = None
+    df_output[Aliases.CONSOMMATION_ZCONHL] = None
+    df_output[Aliases.CONSOMMATION_ZCONHP] = None
+    df_output[Aliases.PUISSANCE_FACTUREE] = None
+    df_output[Aliases.NIVEAU_TENSION] = None
     
     # Group contrats data for faster lookup
     contrats_grouped = contrats_subset.groupby(Aliases.CONTRAT)
     
     for idx, row in df_output.iterrows():
-        contrat = row["Contrat"]
-        target_year = row["Year"]
-        target_month = row["Month"]
+        contrat = row[Aliases.CONTRAT]
+        target_year = row[Aliases.ANNEE]
+        target_month = row[Aliases.MOIS]
         target_ym = target_year * 12 + target_month
-        cons_total = row["Consommation_Total"]
+        cons_total = row[Aliases.CONSOMMATION_KWH]
         
         # Get data for this contract
         try:
             contract_data = contrats_grouped.get_group(contrat)
         except KeyError:
             # Contract not found in df_contrats - use fallback values
-            df_output.at[idx, ZCONHC] = cons_total / 3
-            df_output.at[idx, ZCONHL] = cons_total / 3
-            df_output.at[idx, ZCONHP] = cons_total / 3
-            df_output.at[idx, "Niveau_tension"] = "HT"
+            df_output.at[idx, Aliases.CONSOMMATION_ZCONHC] = cons_total / 3
+            df_output.at[idx, Aliases.CONSOMMATION_ZCONHL] = cons_total / 3
+            df_output.at[idx, Aliases.CONSOMMATION_ZCONHP] = cons_total / 3
+            df_output.at[idx, Aliases.NIVEAU_TENSION] = "HT"
             continue
         
         # Find latest available data (year_month <= target)
         available = contract_data[contract_data["_year_month"] <= target_ym]
         
         if available.empty:
-            df_output.at[idx, ZCONHC] = cons_total / 3
-            df_output.at[idx, ZCONHL] = cons_total / 3
-            df_output.at[idx, ZCONHP] = cons_total / 3
-            df_output.at[idx, "Niveau_tension"] = "HT"
+            df_output.at[idx, Aliases.CONSOMMATION_ZCONHC] = cons_total / 3
+            df_output.at[idx, Aliases.CONSOMMATION_ZCONHL] = cons_total / 3
+            df_output.at[idx, Aliases.CONSOMMATION_ZCONHP] = cons_total / 3
+            df_output.at[idx, Aliases.NIVEAU_TENSION] = "HT"
             continue
         
         # Get the latest row (first due to descending sort)
         latest = available.iloc[0]
         
         # Set Puissance_Facturee and Niveau_tension from latest available data
-        df_output.at[idx, "Puissance_Facturee"] = latest[Aliases.PUISSANCE_FACTUREE]
+        df_output.at[idx, Aliases.PUISSANCE_FACTUREE] = latest[Aliases.PUISSANCE_FACTUREE]
         niveau_tension = latest[Aliases.NIVEAU_TENSION]
-        df_output.at[idx, "Niveau_tension"] = niveau_tension if niveau_tension else "HT"
+        df_output.at[idx, Aliases.NIVEAU_TENSION] = niveau_tension if niveau_tension else "HT"
         
         # Calculate total from breakdown columns
         total_breakdown = (
@@ -204,23 +199,25 @@ def prepare_ca_output(df_prediction, df_contrats):
             pct_hp = latest[Aliases.CONSOMMATION_ZCONHP] / total_breakdown
             
             # Apply percentages to Consommation_Total
-            df_output.at[idx, ZCONHC] = cons_total * pct_hc
-            df_output.at[idx, ZCONHL] = cons_total * pct_hl
-            df_output.at[idx, ZCONHP] = cons_total * pct_hp
+            df_output.at[idx, Aliases.CONSOMMATION_ZCONHC] = cons_total * pct_hc
+            df_output.at[idx, Aliases.CONSOMMATION_ZCONHL] = cons_total * pct_hl
+            df_output.at[idx, Aliases.CONSOMMATION_ZCONHP] = cons_total * pct_hp
         else:
             # If total is zero, split equally
-            df_output.at[idx, ZCONHC] = cons_total / 3
-            df_output.at[idx, ZCONHL] = cons_total / 3
-            df_output.at[idx, ZCONHP] = cons_total / 3
+            df_output.at[idx, Aliases.CONSOMMATION_ZCONHC] = cons_total / 3
+            df_output.at[idx, Aliases.CONSOMMATION_ZCONHL] = cons_total / 3
+            df_output.at[idx, Aliases.CONSOMMATION_ZCONHP] = cons_total / 3
     
     return df_output
 
-def run_stf_cd_forecast(config_path="configs/stf_cd.yaml", latest_year_in_data=None):
+def run_stf_cd_forecast(config, df_contrats, df_features):
     """
     Execute STF CD forecast and return results
     
     Args:
-        config_path: Path to YAML configuration file
+        config: ShortTermForecastConfig object
+        df_contrats: DataFrame with contract data
+        df_features: DataFrame with features data
         
     Returns:
         dict with:
@@ -229,13 +226,6 @@ def run_stf_cd_forecast(config_path="configs/stf_cd.yaml", latest_year_in_data=N
             - error: Error message if status is 'error'
     """
     try:
-        # Load configuration
-        config = ShortTermForecastConfig.from_yaml(config_path)
-
-        if latest_year_in_data is not None:
-            config.evaluation.eval_years_start = latest_year_in_data + 1
-            config.evaluation.eval_years_end = latest_year_in_data + 1
-        
         # Convert to legacy ANALYSIS_CONFIG format
         ANALYSIS_CONFIG = config.to_analysis_config()
         
@@ -244,13 +234,6 @@ def run_stf_cd_forecast(config_path="configs/stf_cd.yaml", latest_year_in_data=N
         VARIABLE = config.data.variable
         RUN_LEVELS = config.data.run_levels
         exp_name = config.project.exp_name
-        
-        # Load data
-        data_loader = DataLoader(PROJECT_ROOT)
-        
-        df_contrats, df_features = data_loader.load_cd_data(
-            db_path=config.project.project_root / config.data.db_path,
-        )
         
         all_results = []
         
@@ -300,11 +283,11 @@ def run_stf_cd_forecast(config_path="configs/stf_cd.yaml", latest_year_in_data=N
                     all_results_established.append(result)
 
             all_results_growth = []
-            for contrat in growth_contracts:
+            for contrat in growth_contracts[:0]:
                 all_results_growth.append(handle_growth_entity_prediction(df_contrats, all_results_established, contrat))
 
             all_results_similarity = []
-            for contrat in similarity_contracts:
+            for contrat in similarity_contracts[:0]:
                 all_results_similarity.append(handle_similarity_entity_prediction(df_contrats, all_results_established, contrat))
             
             all_results_contrats = all_results_established + all_results_similarity + all_results_growth
@@ -338,8 +321,14 @@ if __name__ == "__main__":
     if len(sys.argv) > 1:
         config_path = sys.argv[1]
     
-    # Reload config to create output directories
+    # Load configuration from YAML
     config = ShortTermForecastConfig.from_yaml(config_path)
+    
+    # Apply overrides
+    latest_year_in_data = 2023
+    config.evaluation.eval_years_start = latest_year_in_data + 1
+    config.evaluation.eval_years_end = latest_year_in_data + 1
+    
     PROJECT_ROOT = config.project.project_root
     exp_name = config.project.exp_name
     
@@ -347,8 +336,14 @@ if __name__ == "__main__":
     output_dir = PROJECT_ROOT / 'outputs/outputs_cd'
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Run the forecast
-    result = run_stf_cd_forecast(config_path=config_path, latest_year_in_data=2023)
+    # Initialize DataLoader and load data
+    data_loader = DataLoader(PROJECT_ROOT)
+    df_contrats, df_features = data_loader.load_cd_data(
+        db_path=config.project.project_root / config.data.db_path,
+    )
+    
+    # Run the forecast with config and data
+    result = run_stf_cd_forecast(config=config, df_contrats=df_contrats, df_features=df_features)
     
     # If successful, save outputs to disk
     if result['status'] == 'success':

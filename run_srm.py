@@ -1,25 +1,473 @@
+from pathlib import Path
+import pandas as pd
+from onee.config.stf_config import ShortTermForecastConfig
+from onee.config.ltf_config import LongTermForecastConfig
+from onee.data.loader import DataLoader
+from run_stf_srm import run_stf_srm_forecast, prepare_prediction_output as prepare_prediction_output_stf
+from run_ltf_srm import run_ltf_srm_forecast, prepare_prediction_output as prepare_prediction_output_ltf
+from onee.data.names import Aliases
 
 
-def run_model_grd():
-    _, grd, weather, exog = get_data_from_database() # soufiane
+def get_latest_year_status(df: pd.DataFrame) -> tuple[int | None, int | None]:
+    """
+    Get the latest year and month from the DataFrame.
     
-    latest_year, latest_month, use_mutli_run = get_latest_year_status(grd) # soufiane
+    Args:
+        df: DataFrame with Annee and Mois columns
+        
+    Returns:
+        Tuple of (latest_year, latest_month) or (None, None) if DataFrame is empty
+    """
+    if df is None or df.empty:
+        return None, None
+    latest_year = df[Aliases.ANNEE].max()
+    latest_month = df[df[Aliases.ANNEE] == latest_year][Aliases.MOIS].max()
+    return latest_year, latest_month
 
 
-    if not use_mutli_run:
-        df_results_st = run_stf_srm(grd, weather, exog, latest_year = latest_year)
-        df_results_lt = run_ltf_srm(grd, weather, exog, latest_year = latest_year)
-
+def compute_df_srm(df_regional: pd.DataFrame, df_dist: pd.DataFrame | None, 
+                   var_cols: dict, target_variable: str) -> pd.DataFrame:
+    """
+    Compute df_srm (Regional + Distributors combined).
+    
+    Args:
+        df_regional: Regional DataFrame
+        df_dist: Distributors DataFrame (can be None)
+        var_cols: Dict with column names for regional and distributor variables
+        target_variable: Name of the target variable column
+        
+    Returns:
+        DataFrame with [Annee, Mois, target_variable] columns
+    """
+    reg_var_col = var_cols["regional"]
+    df_total_regional = (
+        df_regional.groupby([Aliases.ANNEE, Aliases.MOIS])
+        .agg({reg_var_col: 'sum'})
+        .reset_index()
+        .rename(columns={reg_var_col: target_variable})
+    )
+    
+    if df_dist is not None and len(df_dist) > 0:
+        dist_var_col = var_cols["distributor"]
+        df_all_dist = (
+            df_dist.groupby([Aliases.ANNEE, Aliases.MOIS])
+            .agg({dist_var_col: 'sum'})
+            .reset_index()
+            .rename(columns={dist_var_col: target_variable})
+        )
+        df_srm = (
+            pd.concat(
+                [df_total_regional[[Aliases.ANNEE, Aliases.MOIS, target_variable]],
+                 df_all_dist[[Aliases.ANNEE, Aliases.MOIS, target_variable]]],
+                ignore_index=True
+            )
+            .groupby([Aliases.ANNEE, Aliases.MOIS])
+            .agg({target_variable: 'sum'})
+            .reset_index()
+        )
     else:
-        df_results_st = run_stf_srm(grd, weather, exog, latest_year = latest_year - 1)
-        df_results_st = correct_with_existant(df_results_st, grd) # mohammed
+        df_srm = df_total_regional[[Aliases.ANNEE, Aliases.MOIS, target_variable]].copy()
+    
+    return df_srm
 
 
-        grd = append_forecast_to_grd(grd, df_results_st) # soufiane
+def append_forecast(df_forecast: pd.DataFrame, df_srm: pd.DataFrame, 
+                    df_regional: pd.DataFrame, target_variable: str) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Append forecast results to the SRM and regional DataFrames.
+    
+    This function updates existing records or appends new ones based on forecast data.
+    For "Total" activity, updates df_srm. For other activities, updates df_regional.
+    
+    Args:
+        df_forecast: DataFrame with forecast results (must have Year, Month, Activity, target_variable columns)
+        df_srm: SRM DataFrame to update
+        df_regional: Regional DataFrame to update
+        target_variable: Name of the target variable column
+        
+    Returns:
+        Tuple of (updated df_srm, updated df_regional)
+    """
+    # Work with copies to avoid modifying original DataFrames unexpectedly
+    df_srm = df_srm.copy()
+    df_regional = df_regional.copy()
+    
+    for _, row in df_forecast.iterrows():
+        year = row[Aliases.ANNEE]
+        month = row[Aliases.MOIS]
+        activity = row[Aliases.ACTIVITE]
+        value = row[target_variable]
 
-        df_results_st_2 = run_stf_srm(grd, weather, exog, latest_year = latest_year)
-        df_results_st = pd.concat([df_results_st, df_results_st_2], axis=0)
+        if activity == "Total":
+            mask = (df_srm[Aliases.ANNEE] == year) & (df_srm[Aliases.MOIS] == month)
+            if not df_srm[mask].empty:
+                df_srm.loc[mask, target_variable] = value
+            else:
+                new_row = {Aliases.ANNEE: year, Aliases.MOIS: month, target_variable: value}
+                df_srm = pd.concat([df_srm, pd.DataFrame([new_row])], ignore_index=True)
+        else:
+            mask = (
+                (df_regional[Aliases.ANNEE] == year) & 
+                (df_regional[Aliases.MOIS] == month) & 
+                (df_regional[Aliases.ACTIVITE] == activity)
+            )
+            if not df_regional[mask].empty:
+                df_regional.loc[mask, target_variable] = value
+            else:
+                new_row = {
+                    Aliases.ANNEE: year, 
+                    Aliases.MOIS: month, 
+                    Aliases.ACTIVITE: activity, 
+                    target_variable: value
+                }
+                df_regional = pd.concat([df_regional, pd.DataFrame([new_row])], ignore_index=True)
 
-        df_results_lt = run_ltf_srm(grd, weather, exog, latest_year = latest_year)
+    return df_srm, df_regional
 
-    return df_results_st, df_results_lt
+
+def correct_prediction_with_existant(df_forecast: pd.DataFrame, df_existant: pd.DataFrame, 
+                                     target_variable: str) -> pd.DataFrame:
+    """
+    Correct forecast predictions using existing data.
+    
+    TODO: Implement correction logic if needed (currently returns unchanged forecast).
+    
+    Args:
+        df_forecast: DataFrame with forecast predictions
+        df_existant: DataFrame with existing data to use for correction
+        target_variable: Name of the target variable column
+        
+    Returns:
+        Corrected forecast DataFrame
+    """
+    return df_forecast
+
+
+def _run_stf_forecast(config_stf: ShortTermForecastConfig, target_region: str, 
+                      region_mode: int, df_regional: pd.DataFrame, 
+                      df_features: pd.DataFrame, df_srm: pd.DataFrame) -> dict:
+    """
+    Execute short-term forecast for a region.
+    
+    Args:
+        config_stf: Short-term forecast configuration
+        target_region: Target region name
+        region_mode: Region run mode
+        df_regional: Regional data
+        df_features: Feature data
+        df_srm: SRM combined data
+        
+    Returns:
+        Result dictionary from run_stf_srm_forecast
+    """
+    return run_stf_srm_forecast(
+        config=config_stf,
+        target_region=target_region,
+        region_mode=region_mode,
+        df_regional=df_regional,
+        df_features=df_features,
+        df_srm=df_srm
+    )
+
+
+def _run_ltf_forecast(config_ltf: LongTermForecastConfig, target_region: str,
+                      df_regional: pd.DataFrame, df_features: pd.DataFrame, 
+                      df_srm: pd.DataFrame) -> dict:
+    """
+    Execute long-term forecast for a region.
+    
+    Args:
+        config_ltf: Long-term forecast configuration
+        target_region: Target region name
+        df_regional: Regional data
+        df_features: Feature data
+        df_srm: SRM combined data
+        
+    Returns:
+        Result dictionary from run_ltf_srm_forecast
+    """
+    return run_ltf_srm_forecast(
+        config=config_ltf,
+        target_region=target_region,
+        df_regional=df_regional,
+        df_features=df_features,
+        df_srm=df_srm,
+        use_output_dir=False
+    )
+
+
+def _process_stf_result(result: dict, target_region: str) -> pd.DataFrame | None:
+    """
+    Process STF result and return formatted DataFrame.
+    
+    Args:
+        result: Result dictionary from STF forecast
+        target_region: Target region name
+        
+    Returns:
+        Formatted DataFrame or None if result failed
+    """
+    if result.get('status') == 'success':
+        return prepare_prediction_output_stf(target_region, result['results'])
+    return None
+
+
+def _process_ltf_result(result: dict, target_region: str) -> pd.DataFrame | None:
+    """
+    Process LTF result and return formatted DataFrame.
+    
+    Args:
+        result: Result dictionary from LTF forecast
+        target_region: Target region name
+        
+    Returns:
+        Formatted DataFrame or None if result failed
+    """
+    if result.get('status') == 'success':
+        return prepare_prediction_output_ltf(target_region, result['results'])
+    return None
+
+
+def _configure_stf_for_year(config_stf: ShortTermForecastConfig, year: int) -> None:
+    """
+    Configure STF config for a specific evaluation year.
+    
+    Args:
+        config_stf: STF config to modify (in-place)
+        year: The year to set for evaluation
+    """
+    config_stf.evaluation.eval_years_start = year
+    config_stf.evaluation.eval_years_end = year
+
+
+def _configure_ltf_for_year(config_ltf: LongTermForecastConfig, latest_year: int) -> None:
+    """
+    Configure LTF config to use latest_year as the base year for forecasting.
+    
+    Args:
+        config_ltf: LTF config to modify (in-place)
+        latest_year: The latest year of data to use as base
+    """
+    config_ltf.temporal.forecast_runs[0] = (
+        config_ltf.temporal.forecast_runs[0][0],
+        latest_year
+    )
+
+
+def _process_complete_year(config_stf: ShortTermForecastConfig, 
+                           config_ltf: LongTermForecastConfig,
+                           target_region: str, region_mode: int,
+                           df_regional: pd.DataFrame, df_features: pd.DataFrame, 
+                           df_srm: pd.DataFrame, latest_year: int) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+    """
+    Process forecasts when the latest year has complete data (month == 12).
+    
+    Args:
+        config_stf: Short-term forecast configuration
+        config_ltf: Long-term forecast configuration
+        target_region: Target region name
+        region_mode: Region run mode
+        df_regional: Regional data
+        df_features: Feature data
+        df_srm: SRM combined data
+        latest_year: The latest complete year
+        
+    Returns:
+        Tuple of (STF result DataFrame, LTF result DataFrame)
+    """
+    # Configure and run STF for next year
+    _configure_stf_for_year(config_stf, latest_year + 1)
+    stf_result = _run_stf_forecast(
+        config_stf, target_region, region_mode, df_regional, df_features, df_srm
+    )
+    df_stf = _process_stf_result(stf_result, target_region)
+    
+    # Configure and run LTF
+    _configure_ltf_for_year(config_ltf, latest_year)
+    ltf_result = _run_ltf_forecast(
+        config_ltf, target_region, df_regional, df_features, df_srm
+    )
+    df_ltf = _process_ltf_result(ltf_result, target_region)
+    
+    return df_stf, df_ltf
+
+
+def _process_incomplete_year(config_stf: ShortTermForecastConfig, 
+                             config_ltf: LongTermForecastConfig,
+                             target_region: str, region_mode: int,
+                             df_regional: pd.DataFrame, df_features: pd.DataFrame, 
+                             df_srm: pd.DataFrame, latest_year: int, 
+                             latest_month: int, target_variable: str) -> tuple[pd.DataFrame | None, pd.DataFrame | None]:
+    """
+    Process forecasts when the latest year has incomplete data (month < 12).
+    
+    This performs a two-step STF forecast:
+    1. First, complete the current year (months after latest_month)
+    2. Then, forecast the full next year
+    
+    Args:
+        config_stf: Short-term forecast configuration
+        config_ltf: Long-term forecast configuration
+        target_region: Target region name
+        region_mode: Region run mode
+        df_regional: Regional data
+        df_features: Feature data
+        df_srm: SRM combined data
+        latest_year: The latest year with data
+        latest_month: The latest month with data
+        target_variable: Name of the target variable
+        
+    Returns:
+        Tuple of (STF result DataFrame, LTF result DataFrame)
+    """
+    # Step 1: Complete current year forecast
+    _configure_stf_for_year(config_stf, latest_year)
+    result_current_year = _run_stf_forecast(
+        config_stf, target_region, region_mode, df_regional, df_features, df_srm
+    )
+    
+    if result_current_year.get('status') != 'success':
+        print(f"Warning: STF forecast failed for {target_region} (current year)")
+        return None, None
+    # Prepare existing data for correction
+    df_srm_copy = df_srm.copy()
+    df_srm_copy[Aliases.ACTIVITE] = "Total"
+    df_existant = pd.concat([df_regional.copy(), df_srm_copy], ignore_index=True)
+    
+    # Process current year result
+    df_result_current = prepare_prediction_output_stf(target_region, result_current_year['results'])
+    df_result_current = correct_prediction_with_existant(df_result_current, df_existant, target_variable)
+    
+    # Update data with current year forecast for next year's forecast
+    df_srm_updated, df_regional_updated = append_forecast(
+        df_result_current, df_srm, df_regional, target_variable
+    )
+
+    # Step 2: Forecast next year
+    _configure_stf_for_year(config_stf, latest_year + 1)
+    result_next_year = _run_stf_forecast(
+        config_stf, target_region, region_mode, df_regional_updated, df_features, df_srm_updated
+    )
+    
+    if result_next_year.get('status') != 'success':
+        print(f"Warning: STF forecast failed for {target_region} (next year)")
+        return None, None
+    
+    df_result_next = prepare_prediction_output_stf(target_region, result_next_year['results'])
+    
+    # Combine results: months after latest_month from current year + all of next year
+    df_current_remaining = df_result_current[df_result_current[Aliases.MOIS] > latest_month]
+    df_stf_combined = pd.concat([df_current_remaining, df_result_next], axis=0, ignore_index=True)
+    
+    # Run LTF forecast
+    _configure_ltf_for_year(config_ltf, latest_year)
+    ltf_result = _run_ltf_forecast(
+        config_ltf, target_region, df_regional_updated, df_features, df_srm_updated
+    )
+    df_ltf = _process_ltf_result(ltf_result, target_region)
+    
+    return df_stf_combined, df_ltf
+
+def extrapolate_features(df_features: pd.DataFrame, latest_year: int) -> pd.DataFrame:
+    if latest_year in df_features[Aliases.ANNEE].values:
+        return df_features 
+    df_features = df_features.sort_values(by=Aliases.ANNEE)
+    last_year = df_features[Aliases.ANNEE].max()
+    years_to_add = latest_year - last_year
+    df_to_append = df_features[df_features[Aliases.ANNEE] == last_year].copy()
+    for year in range(1, years_to_add + 1):
+        new_year = last_year + year
+        df_new = df_to_append.copy()
+        df_new[Aliases.ANNEE] = new_year
+        for col in df_features.columns:
+            if col != Aliases.ANNEE and pd.api.types.is_numeric_dtype(df_features[col]):
+                prev_val = df_features[df_features[Aliases.ANNEE] == last_year - 1][col].values[0]
+                curr_val = df_features[df_features[Aliases.ANNEE] == last_year][col].values[0]
+                if prev_val != 0:
+                    growth_rate = (curr_val - prev_val) / prev_val
+                    df_new[col] = df_new[col] * (1 + growth_rate)
+        df_features = pd.concat([df_features, df_new], ignore_index=True)
+    return df_features
+
+
+def run_full_forecast_srm(regions_override: dict | None = None) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """
+    Run SRM forecasts for all configured regions.
+    
+    This function loads configuration, iterates through regions, and runs both
+    short-term (STF) and long-term (LTF) forecasts for each region.
+    
+    Args:
+        regions_override: Optional dict to override regions from config.
+                         Keys are region names, values are region modes.
+        
+    Returns:
+        Tuple of (df_stf_results, df_ltf_results) DataFrames containing all forecasts
+    """
+    # Load configuration
+    config_path_stf = Path(__file__).parent / "configs/stf_srm.yaml"
+    config_path_ltf = Path(__file__).parent / "configs/ltf_srm.yaml"
+    config_stf = ShortTermForecastConfig.from_yaml(config_path_stf)
+    config_ltf = LongTermForecastConfig.from_yaml(config_path_ltf)
+    
+    PROJECT_ROOT = config_stf.project.project_root
+    VARIABLE = config_stf.data.variable
+    REGIONS = regions_override if regions_override is not None else config_stf.data.regions
+    
+    # Initialize DataLoader
+    data_loader = DataLoader(PROJECT_ROOT)
+    
+    # Collect results
+    all_results_stf = []
+    all_results_ltf = []
+
+    for target_region, region_mode in list(REGIONS.items()):
+        print(f"Loading data for {target_region}...")
+        
+        # Load region data
+        df_regional, df_features, df_dist, var_cols = data_loader.load_srm_data(
+            db_path=config_stf.project.project_root / config_stf.data.db_path,
+            variable=VARIABLE,
+            target_region=target_region,
+        )
+
+        # Get latest year and month from data
+        latest_year, latest_month = get_latest_year_status(df_regional)
+        if latest_year is None:
+            print(f"Warning: No data found for {target_region}, skipping...")
+            continue
+        
+        df_features = extrapolate_features(df_features, latest_year + 1)
+
+        # Compute combined SRM data (Regional + Distributors)
+        df_srm = compute_df_srm(df_regional, df_dist, var_cols, VARIABLE)
+        # Process based on whether the year is complete or not
+        if latest_month == 12:
+            df_stf, df_ltf = _process_complete_year(
+                config_stf, config_ltf, target_region, region_mode,
+                df_regional, df_features, df_srm, latest_year
+            )
+        else:
+            df_stf, df_ltf = _process_incomplete_year(
+                config_stf, config_ltf, target_region, region_mode,
+                df_regional, df_features, df_srm, latest_year, latest_month, VARIABLE
+            )
+        
+        # Collect results
+        if df_stf is not None:
+            all_results_stf.append(df_stf)
+        if df_ltf is not None:
+            all_results_ltf.append(df_ltf)
+
+    # Combine all results
+    df_results_stf = pd.concat(all_results_stf, axis=0, ignore_index=True) if all_results_stf else pd.DataFrame()
+    df_results_ltf = pd.concat(all_results_ltf, axis=0, ignore_index=True) if all_results_ltf else pd.DataFrame()
+    
+    return df_results_stf, df_results_ltf
+
+if __name__ == "__main__":
+    df_stf, df_ltf = run_full_forecast_srm()
+    df_stf.to_csv("stf_srm_results.csv", index=False)
+    df_ltf.to_csv("ltf_srm_results.csv", index=False)
+    print(f"STF results saved: {len(df_stf)} rows")
+    print(f"LTF results saved: {len(df_ltf)} rows")

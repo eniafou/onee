@@ -12,7 +12,7 @@ from onee.utils import fill_2020_with_avg, get_move_in_year, clean_name
 from onee.config.ltf_config import LongTermForecastConfig
 from onee.data.loader import DataLoader
 from onee.data.names import Aliases
-
+from onee.utils import get_move_out_year
 
 import numpy as np
 import pandas as pd
@@ -42,9 +42,9 @@ def prepare_prediction_output(all_results):
         for y, v in zip(r["forecast_years"], r["pred_annual"]):
             df_summary_records.append(
                 {
-                    "Activity": r.get("activity"),
-                    "Year": y,
-                    "Consommation_Total": v
+                    Aliases.ACTIVITE: r.get("activity"),
+                    Aliases.ANNEE: y,
+                    Aliases.CONSOMMATION_KWH: v
                 }
             )
     
@@ -66,13 +66,6 @@ def prepare_ca_output(df_prediction, df_contrats):
                                Consommation_Total, Consommation_ZCONHC, Consommation_ZCONHL, 
                                Consommation_ZCONHP, Puissance_Facturee, Niveau_tension
     """
-    from onee.utils import get_move_out_year
-    
-    # Column names for the output breakdown
-    ZCONHC = "Consommation_ZCONHC"
-    ZCONHL = "Consommation_ZCONHL"
-    ZCONHP = "Consommation_ZCONHP"
-    
     # Get unique contracts and compute move_out_year for each
     contracts = df_contrats[Aliases.CONTRAT].unique()
     
@@ -117,9 +110,9 @@ def prepare_ca_output(df_prediction, df_contrats):
     
     # Process each (Activity, Year) from predictions
     for _, pred_row in df_prediction.iterrows():
-        activity = pred_row["Activity"]
-        year = pred_row["Year"]
-        total_consumption = pred_row["Consommation_Total"]
+        activity = pred_row[Aliases.ACTIVITE]
+        year = pred_row[Aliases.ANNEE]
+        total_consumption = pred_row[Aliases.CONSOMMATION_KWH]
         
         # Find all contracts for this activity that are still operating (move_out_year >= year)
         active_contracts = []
@@ -196,31 +189,31 @@ def prepare_ca_output(df_prediction, df_contrats):
             
             # Apply breakdown percentages to get ZCONHC, ZCONHL, ZCONHP
             records.append({
-                "Region": c["region"],
-                "Partenaire": c["partenaire"],
-                "Contrat": c["contrat"],
-                "Activity": c["activite"],
-                "Year": year,
-                "Consommation_Total": contract_consumption,
-                ZCONHC: contract_consumption * c["pct_hc"],
-                ZCONHL: contract_consumption * c["pct_hl"],
-                ZCONHP: contract_consumption * c["pct_hp"],
-                "Puissance_Facturee": c["pf_value"],
-                "Niveau_tension": c["niveau_tension"]
+                Aliases.REGION: c["region"],
+                Aliases.PARTENAIRE: c["partenaire"],
+                Aliases.CONTRAT: c["contrat"],
+                Aliases.ACTIVITE: c["activite"],
+                Aliases.ANNEE: year,
+                Aliases.CONSOMMATION_KWH: contract_consumption,
+                Aliases.CONSOMMATION_ZCONHC: contract_consumption * c["pct_hc"],
+                Aliases.CONSOMMATION_ZCONHL: contract_consumption * c["pct_hl"],
+                Aliases.CONSOMMATION_ZCONHP: contract_consumption * c["pct_hp"],
+                Aliases.PUISSANCE_FACTUREE: c["pf_value"],
+                Aliases.NIVEAU_TENSION: c["niveau_tension"]
             })
     
     if not records:
         return pd.DataFrame(columns=[
-            "Region", "Partenaire", "Contrat", "Activity", "Year",
-            "Consommation_Total", ZCONHC, ZCONHL, ZCONHP, 
-            "Puissance_Facturee", "Niveau_tension"
+            Aliases.REGION, Aliases.PARTENAIRE, Aliases.CONTRAT, Aliases.ACTIVITE, Aliases.ANNEE,
+            Aliases.CONSOMMATION_KWH, Aliases.CONSOMMATION_ZCONHC, Aliases.CONSOMMATION_ZCONHL, Aliases.CONSOMMATION_ZCONHP, 
+            Aliases.PUISSANCE_FACTUREE, Aliases.NIVEAU_TENSION
         ])
     
     df_output = pd.DataFrame(records)
     
     # Sort for better readability
     df_output = df_output.sort_values(
-        ["Region", "Partenaire", "Contrat", "Activity", "Year"]
+        [Aliases.REGION, Aliases.PARTENAIRE, Aliases.CONTRAT, Aliases.ACTIVITE, Aliases.ANNEE]
     ).reset_index(drop=True)
     
     return df_output
@@ -231,13 +224,14 @@ def prepare_ca_output(df_prediction, df_contrats):
 # MAIN EXECUTION
 # ─────────────────────────────────────────────────────────────
 
-def run_ltf_cd_forecast(config_path="configs/ltf_cd.yaml",  latest_year_in_data=None, horizon=5, output_dir=None,):
+def run_ltf_cd_forecast(config, df_contrats, df_features, output_dir=None):
     """
     Execute LTF CD forecast and return results
     
     Args:
-        config_path: Path to YAML configuration file
-        project_root: Path object for project root directory (optional)
+        config: LongTermForecastConfig object
+        df_contrats: DataFrame with contract data
+        df_features: DataFrame with features data
         output_dir: Path to output directory (optional). If provided, passes to save_folder. If None, passes None.
         
     Returns:
@@ -247,16 +241,6 @@ def run_ltf_cd_forecast(config_path="configs/ltf_cd.yaml",  latest_year_in_data=
             - error: Error message if status is 'error'
     """
     try:
-        # Load configuration from YAML
-        config = LongTermForecastConfig.from_yaml(config_path)
-
-        if latest_year_in_data is not None:
-            config.temporal.forecast_runs[0] = (
-                config.temporal.forecast_runs[0][0],
-                latest_year_in_data
-            )
-            config.temporal.horizon = horizon if horizon is not None else config.temporal.horizon
-        
         # Extract config values
         RUN_LEVELS = set(config.data.run_levels)
         forecast_runs = config.temporal.forecast_runs
@@ -266,11 +250,6 @@ def run_ltf_cd_forecast(config_path="configs/ltf_cd.yaml",  latest_year_in_data=
         
         # Initialize DataLoader
         data_loader = DataLoader(config.project.project_root)
-
-        # Load data using DataLoader
-        df_contrats, df_features = data_loader.load_cd_data(
-            db_path=config.project.project_root / config.data.db_path,
-        )
 
         all_results = []
 
@@ -306,7 +285,6 @@ def run_ltf_cd_forecast(config_path="configs/ltf_cd.yaml",  latest_year_in_data=
                     df_activite_features = data_loader.compute_contract_features(df_contrats, entity_col=Aliases.ACTIVITE, end_year=train_end + config.temporal.horizon)
                     df_a = df_activite_features[df_activite_features[Aliases.ACTIVITE] == activite]
                     df_a = df_a.merge(df_features, on=Aliases.ANNEE, how="outer")
-                    print(df_a.tail())
 
                     res = run_long_horizon_forecast(
                         monthly_matrix=monthly_matrix,
@@ -374,8 +352,17 @@ if __name__ == "__main__":
     # Load configuration from command line or use default
     config_path = sys.argv[1] if len(sys.argv) > 1 else "configs/ltf_cd.yaml"
     
-    # Reload config to create output directory
+    # Load configuration from YAML
     config = LongTermForecastConfig.from_yaml(config_path)
+    
+    # Apply overrides
+    latest_year_in_data = 2023
+    horizon = 5
+    config.temporal.forecast_runs[0] = (
+        config.temporal.forecast_runs[0][0],
+        latest_year_in_data
+    )
+    config.temporal.horizon = horizon
     
     # Create output directory
     output_dir = (
@@ -385,14 +372,17 @@ if __name__ == "__main__":
     )
     output_dir.mkdir(parents=True, exist_ok=True)
     
-    # Run the forecast with output_dir
-    result = run_ltf_cd_forecast(config_path=config_path, output_dir=None, latest_year_in_data=2023)
-    df_prediction = prepare_prediction_output(result['results'])
+    # Initialize DataLoader and load data
     data_loader = DataLoader(config.project.project_root)
-    df_contrats, _ = data_loader.load_cd_data(
-            db_path=config.project.project_root / config.data.db_path,)
+    df_contrats, df_features = data_loader.load_cd_data(
+        db_path=config.project.project_root / config.data.db_path,
+    )
+    
+    # Run the forecast with config, data, and output_dir
+    result = run_ltf_cd_forecast(config=config, df_contrats=df_contrats, df_features=df_features, output_dir=None)
+    df_prediction = prepare_prediction_output(result['results'])
     final_df = prepare_ca_output(df_prediction, df_contrats)
-    final_df.to_csv("test_final_df.csv", index=False)
+    final_df.to_csv("ltf_cd_results.csv", index=False)
     # If successful, save outputs to disk
     # if result['status'] == 'success':
     #     all_results = result['results']

@@ -156,11 +156,11 @@ def add_monthly_feature(X, years, df_monthly, feature = "temperature", agg_metho
     return np.hstack([X, temp_array])
 
 
-def add_yearly_feature(X, years, df_yearly, feature="temperature", agg_method="mean"):
+def add_yearly_feature(X, years, df_monthly, feature="temperature", agg_method="mean"):
     """Add yearly feature values"""
     yearly_data = []
     for year in years:
-        val = df_yearly[df_yearly[Aliases.ANNEE] == year][feature].agg(agg_method)
+        val = df_monthly[df_monthly[Aliases.ANNEE] == year][feature].agg(agg_method)
         if pd.isna(val):
             val = 0
         yearly_data.append([val])
@@ -243,9 +243,7 @@ def safe_parse_date(x):
 
     return None  # could not parse
 
-def get_move_in_year(df_c, consommation_col = None, not_started_yet_th = 20):
-    if consommation_col is None:
-        consommation_col = Aliases.CONSOMMATION_KWH
+def get_move_in_year(df_c, consommation_col = Aliases.CONSOMMATION_KWH, not_started_yet_th = 20):
     """
     Extract the first non-null 'DATE_EMMENAGEMENT' value from a DataFrame
     and return its year as an integer, or None if not available.

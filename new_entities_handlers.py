@@ -124,7 +124,7 @@ def _collect_starting_samples_growth(df_scope, use_ratio=False):
 
 def handle_similarity_entity_prediction(df, all_results_established, entity_id, level_type=None, save_csv = True):
     """
-    Generic handler for similarity entities (2023 starters).
+    Generic handler for similarity entities (prediction_year starters).
     Replaced clustering with a small predictive model:
     predict the starting 12-month consumption based on
     the starting 12-month puissance facturée and optionally the PA/PF ratio (pa/pf).
@@ -313,7 +313,6 @@ def handle_growth_entity_prediction(df, all_results_established, entity_id, leve
     if len(X_list) < 5:
         print("⚠️ Not enough training data for predictive growth in this activity→ fallback to full training.")
         X_list, y_list = _collect_starting_samples_growth(df.copy())
-        # return handle_growth_entity(df, all_results_established, entity_id, level_type)
 
     X = np.vstack(X_list)
     y = np.array(y_list)
@@ -464,47 +463,6 @@ def handle_growth_entity_prediction(df, all_results_established, entity_id, leve
 
     print(f"✅ Predicted 2023 annual (growth-based): {predicted_2023_annual:,.2f}")
     return result
-
-
-def prepare_kproto_clusters(df):
-    """
-    K-Prototypes clustering with categorical 'activite' and numeric monthly 'puissance facturée'.
-    Works identically to the version you validated manually.
-    """
-    df_2023 = df[df[Aliases.ANNEE] == 2023].copy()
-    df_2023 = df_2023[[Aliases.CONTRAT, Aliases.ACTIVITE, Aliases.MOIS, Aliases.PUISSANCE_FACTUREE]].dropna()
-    df_2023[Aliases.ACTIVITE] = df_2023[Aliases.ACTIVITE].astype(str)
-
-    # Pivot to get monthly columns
-    da = df_2023[[Aliases.CONTRAT, Aliases.ACTIVITE]].drop_duplicates()
-    dd = df_2023.pivot(index=Aliases.CONTRAT, columns=Aliases.MOIS, values=Aliases.PUISSANCE_FACTUREE)
-    data = dd.merge(da, on=Aliases.CONTRAT)
-
-    # Make 'activite' the first column
-    data[Aliases.CONTRAT] = data[Aliases.ACTIVITE]
-    data.drop(columns=[Aliases.ACTIVITE], inplace=True)
-    data.rename(columns={Aliases.CONTRAT: Aliases.ACTIVITE}, inplace=True)
-
-    # Prepare matrix for K-Prototypes
-    X = data.to_numpy(dtype=object)
-    categorical_cols = [0]  # first column is 'activite'
-
-    from kmodes.kprototypes import KPrototypes
-    kproto = KPrototypes(n_clusters=4, init='Huang', random_state=42)
-    clusters = kproto.fit_predict(X, categorical=categorical_cols)
-
-    data['cluster'] = clusters
-
-    # Compute cluster centroids
-    cluster_profiles = (
-        data.groupby('cluster')[[col for col in data.columns if isinstance(col, (int, np.integer))]]
-        .mean()
-        .rename(columns={i: f'mois_{i}' for i in range(1, 13)})
-    )
-
-    print(f"✅ K-Prototypes trained successfully ({len(cluster_profiles)} clusters).")
-    return kproto, cluster_profiles, data[[Aliases.ACTIVITE, 'cluster']]
-
 
 
 def _build_empty_result(df_entity, entity_id, level_type=Aliases.CONTRAT):

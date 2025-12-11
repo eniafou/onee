@@ -24,27 +24,31 @@ warnings.filterwarnings("ignore")
 # ─────────────────────────────────────────────────────────────
 # HELPER FUNCTIONS
 # ─────────────────────────────────────────────────────────────
-def prepare_prediction_output(all_results_by_region):
+def prepare_prediction_output(region, results_list):
     """
-    Create a simple summary DataFrame with Region, Year, and Predicted_Annual
+    Create a simple summary DataFrame with Region, Year, and Predicted_Annual for a single region.
     
     Args:
-        all_results_by_region: Dict mapping region names to list of forecast result dictionaries
+        region: Region name
+        results_list: List of forecast result dictionaries for this region
         
     Returns:
-        pandas DataFrame with Region, Year, and Predicted_Annual columns
+        pandas DataFrame with Region, Year, and Consommation columns
     """
     df_summary_records = []
-    for region_name, results_list in all_results_by_region.items():
-        for r in results_list:
-            for y, v in zip(r["forecast_years"], r["pred_annual"]):
-                df_summary_records.append(
-                    {
-                        "Region": r.get("region", region_name),
-                        "Year": y,
-                        "Consommation": v
-                    }
-                )
+    
+    if not results_list:
+        return pd.DataFrame(columns=[Aliases.REGION, Aliases.ANNEE, Aliases.CONSOMMATION_KWH])
+    
+    for r in results_list:
+        for y, v in zip(r["forecast_years"], r["pred_annual"]):
+            df_summary_records.append(
+                {
+                    Aliases.REGION: r.get("region", region),
+                    Aliases.ANNEE: y,
+                    Aliases.CONSOMMATION_KWH: v
+                }
+            )
     
     return pd.DataFrame(df_summary_records)
 
@@ -53,251 +57,140 @@ def prepare_prediction_output(all_results_by_region):
 # ─────────────────────────────────────────────────────────────
 # MAIN EXECUTION
 # ─────────────────────────────────────────────────────────────
-def run_ltf_srm_forecast(config_path="configs/ltf_srm.yaml", use_output_dir=False, latest_year_in_data=None, horizon = 5):
+def run_ltf_srm_forecast(config, target_region, df_regional, df_features, df_srm, use_output_dir=False):
     """
-    Execute LTF SRM forecast and return results
+    Execute LTF SRM forecast for a single region and return results
     
     Args:
-        config_path: Path to YAML configuration file
+        config: LongTermForecastConfig object (already configured)
+        target_region: Name of the region to forecast
+        df_regional: Regional DataFrame
+        df_features: Features DataFrame
+        df_srm: Pre-computed SRM DataFrame (Regional + Distributors combined), with columns [Annee, Mois, target_variable]
         use_output_dir: Boolean to control output directory usage. If True, creates and uses output_dir. If False, passes None.
         
     Returns:
         dict with:
             - status: 'success' or 'error'
-            - results: Dict mapping region names to list of forecast results
+            - results: List of forecast results for this region
             - error: Error message if status is 'error'
     """
     try:
-        # Load configuration from YAML
-        config = LongTermForecastConfig.from_yaml(config_path)
-
-        if latest_year_in_data is not None:
-            config.temporal.forecast_runs[0] = (
-                config.temporal.forecast_runs[0][0],
-                latest_year_in_data
-            )
-            config.temporal.horizon = horizon if horizon is not None else config.temporal.horizon
-        
         # Extract config values
-        REGIONS = config.data.regions
         RUN_LEVELS = set(config.data.run_levels)
         forecast_runs = config.temporal.forecast_runs
         
         # Get model registry
         MODEL_REGISTRY = config.get_model_registry()
         
-        # Initialize DataLoader
+        # Initialize DataLoader for client predictions
         data_loader = DataLoader(config.project.project_root)
-        
-        all_results_by_region = {}
 
-        for TARGET_REGION in REGIONS:
-            print(f"\n{'='*80}\n🌍 REGION: {TARGET_REGION}\n{'='*80}")
+        print(f"\n{'='*80}\n🌍 REGION: {target_region}\n{'='*80}")
 
-            # Create output_dir if use_output_dir is True, otherwise None
-            if use_output_dir:
-                output_dir = config.get_output_dir(TARGET_REGION)
-                output_dir.mkdir(parents=True, exist_ok=True)
-            else:
-                output_dir = None
+        # Create output_dir if use_output_dir is True, otherwise None
+        if use_output_dir:
+            output_dir = config.get_output_dir(target_region)
+            output_dir.mkdir(parents=True, exist_ok=True)
+        else:
+            output_dir = None
 
-            # Load data using DataLoader
-            df_regional, df_features, df_dist, var_cols = data_loader.load_srm_data(
-                db_path=config.project.project_root / config.data.db_path,
-                variable=config.data.target_variable,
-                target_region=TARGET_REGION,
+        # Lookup of previously computed monthly client predictions
+        client_predictions_lookup = data_loader.load_client_prediction_lookup(
+            target_region
+        )
+        all_results = []
+
+        activities = sorted(df_regional[Aliases.ACTIVITE].unique())
+
+        for train_start, train_end in forecast_runs:
+            print(
+                f"\n🧭 Training {train_start}→{train_end}, horizon={config.temporal.horizon}"
             )
-            
-            reg_var_col = var_cols["regional"]
-            dist_var_col = var_cols["distributor"]
 
-            # Lookup of previously computed monthly client predictions
-            client_predictions_lookup = data_loader.load_client_prediction_lookup(
-                TARGET_REGION
-            )
-            all_results = []
-
-            activities = sorted(df_regional[Aliases.ACTIVITE].unique())
-
-            for train_start, train_end in forecast_runs:
+            # ────────────────────────────────────────────────────────────────
+            # LEVEL 1: SRM
+            # ────────────────────────────────────────────────────────────────
+            if 1 in RUN_LEVELS:
                 print(
-                    f"\n🧭 Training {train_start}→{train_end}, horizon={config.temporal.horizon}"
+                    f"\n{'#'*60}\nLEVEL 1: SRM (Regional + Distributors)\n{'#'*60}"
+                )
+                DataLoader.aggregate_predictions(
+                    client_predictions_lookup,
+                    "SRM_Regional_Plus_Dist",
+                    ["Total_Regional", "All_Distributors"],
+                )
+                
+                df_srm_filtered = df_srm[df_srm[Aliases.ANNEE] >= train_start].copy()
+                if config.data.impute_2020:
+                    df_srm_filtered = fill_2020_with_avg(df_srm_filtered, config.data.target_variable)
+
+                df_train = df_srm_filtered[df_srm_filtered[Aliases.ANNEE] <= train_end]
+                monthly_matrix = create_monthly_matrix(
+                    df_train, value_col=config.data.target_variable
+                )
+                years = np.sort(df_train[Aliases.ANNEE].unique())
+
+                res = run_long_horizon_forecast(
+                    monthly_matrix=monthly_matrix,
+                    years=years,
+                    df_features=df_features,
+                    df_monthly=df_srm_filtered,
+                    config=config,
+                    MODEL_REGISTRY=MODEL_REGISTRY,
+                    monthly_clients_lookup=client_predictions_lookup.get(
+                        "SRM_Regional_Plus_Dist", {}
+                    ),
+                    region_entity = f"{target_region} - SRM (Regional + Distributors)",
+                    save_folder=output_dir if output_dir else None
                 )
 
-                # ────────────────────────────────────────────────────────────────
-                # LEVEL 1: SRM
-                # ────────────────────────────────────────────────────────────────
-                if 1 in RUN_LEVELS:        
-                    if len(df_dist) >= 1:                    
-                        print(
-                            f"\n{'#'*60}\nLEVEL 1: SRM (Regional + Distributors)\n{'#'*60}"
-                        )
-                        DataLoader.aggregate_predictions(
-                            client_predictions_lookup,
-                            "SRM_Regional_Plus_Dist",
-                            ["Total_Regional", "All_Distributors"],
-                        )
-                        df_all_dist = (
-                            df_dist.groupby([Aliases.ANNEE, Aliases.MOIS])
-                            .agg({dist_var_col: "sum"})
-                            .reset_index()
-                            .rename(columns={dist_var_col: config.data.target_variable})
-                        )
-                        df_total_regional = (
-                            df_regional.groupby([Aliases.ANNEE, Aliases.MOIS])
-                            .agg({reg_var_col: "sum"})
-                            .reset_index()
-                            .rename(columns={reg_var_col: config.data.target_variable})
-                        )
-                        df_srm = (
-                            pd.concat([df_total_regional, df_all_dist], ignore_index=True)
-                            .groupby([Aliases.ANNEE, Aliases.MOIS])
-                            .agg({config.data.target_variable: "sum"})
-                            .reset_index()
-                        )
-                        df_srm = df_srm[df_srm[Aliases.ANNEE] >= train_start]
-                        if config.data.impute_2020:
-                            df_srm = fill_2020_with_avg(df_srm, config.data.target_variable)
-
-                        df_train = df_srm[df_srm[Aliases.ANNEE] <= train_end]
-                        monthly_matrix = create_monthly_matrix(
-                            df_train, value_col=config.data.target_variable
-                        )
-                        years = np.sort(df_train[Aliases.ANNEE].unique())
-
-                        res = run_long_horizon_forecast(
-                            monthly_matrix=monthly_matrix,
-                            years=years,
-                            df_features=df_features,
-                            df_monthly=df_srm,
-                            config=config,
-                            MODEL_REGISTRY=MODEL_REGISTRY,
-                            monthly_clients_lookup=client_predictions_lookup.get(
-                                "SRM_Regional_Plus_Dist", {}
-                            ),
-                            region_entity = f"{TARGET_REGION} - SRM (Regional + Distributors)",
-                            save_folder=output_dir if output_dir else None
+                forecast_years = [y for y, _ in res["horizon_predictions"]]
+                pred_annual = [float(v) for _, v in res["horizon_predictions"]]
+                actuals = []
+                percent_errors = []
+                for y, v in zip(forecast_years, pred_annual):
+                    actual = None
+                    percent_error = None
+                    mask = df_srm_filtered[Aliases.ANNEE] == y
+                    if not df_srm_filtered.loc[mask, config.data.target_variable].empty:
+                        actual = df_srm_filtered.loc[mask, config.data.target_variable].sum()
+                        percent_error = (
+                            (v - actual) / actual * 100 if actual != 0 else None
                         )
 
-                        forecast_years = [y for y, _ in res["horizon_predictions"]]
-                        pred_annual = [float(v) for _, v in res["horizon_predictions"]]
-                        actuals = []
-                        percent_errors = []
-                        for y, v in zip(forecast_years, pred_annual):
-                            actual = None
-                            percent_error = None
-                            mask = df_srm[Aliases.ANNEE] == y
-                            if not df_srm.loc[mask, config.data.target_variable].empty:
-                                actual = df_srm.loc[mask, config.data.target_variable].sum()
-                                percent_error = (
-                                    (v - actual) / actual * 100 if actual != 0 else None
-                                )
+                    actuals.append(actual)
+                    percent_errors.append(percent_error)
 
-                            actuals.append(actual)
-                            percent_errors.append(percent_error)
-
-                        all_results.append(
-                            {
-                                "region": TARGET_REGION,
-                                "train_start": train_start,
-                                "train_end": train_end,
-                                "level": "SRM_Regional_Plus_Dist",
-                                "forecast_years": forecast_years,
-                                "pred_annual": pred_annual,
-                                "pred_monthly": res["monthly_forecasts"],
-                                "run_parameters": res.get("run_parameters", {}),
-                                "actuals": actuals,
-                                "percent_errors": percent_errors,
-                            }
-                        )
-                    else:
-                        print(f"\n{'#'*60}\nLEVEL 4: TOTAL REGIONAL\n{'#'*60}")
-                        df_total_regional = (
-                            df_regional.groupby([Aliases.ANNEE, Aliases.MOIS])
-                            .agg({reg_var_col: "sum"})
-                            .reset_index()
-                            .rename(columns={reg_var_col: config.data.target_variable})
-                        )
-                        if config.data.impute_2020:
-                            df_total_regional = fill_2020_with_avg(df_total_regional, reg_var_col)
-                        DataLoader.aggregate_predictions(
-                            client_predictions_lookup,
-                            "Total_Regional",
-                            [f"Activity_{a}" for a in activities],
-                        )
-
-                        df_train = df_total_regional[
-                            (df_total_regional[Aliases.ANNEE] >= train_start) & (df_total_regional[Aliases.ANNEE] <= train_end)
-                        ]
-                        monthly_matrix = create_monthly_matrix(
-                            df_train, value_col=config.data.target_variable
-                        )
-                        years = np.sort(df_train[Aliases.ANNEE].unique())
-
-                        res = run_long_horizon_forecast(
-                            monthly_matrix=monthly_matrix,
-                            years=years,
-                            df_features=df_features,
-                            df_monthly=df_total_regional,
-                            config=config,
-                            MODEL_REGISTRY=MODEL_REGISTRY,
-                            monthly_clients_lookup=client_predictions_lookup.get(
-                                "Total_Regional", {}
-                            ),
-                            region_entity = f"{TARGET_REGION} - TOTAL REGIONAL",
-                            save_folder=output_dir if output_dir else None,
-                        )
-
-                        forecast_years = [y for y, _ in res["horizon_predictions"]]
-                        pred_annual = [float(v) for _, v in res["horizon_predictions"]]
-
-                        actuals = []
-                        percent_errors = []
-                        for y, v in zip(forecast_years, pred_annual):
-                            actual = None
-                            percent_error = None
-                            mask = df_total_regional[Aliases.ANNEE] == y
-                            if not df_total_regional.loc[mask, reg_var_col].empty:
-                                actual = df_total_regional.loc[mask, reg_var_col].sum()
-                                percent_error = (
-                                    (v - actual) / actual * 100 if actual != 0 else None
-                                )
-                            actuals.append(actual)
-                            percent_errors.append(percent_error)
-
-                        all_results.append(
-                            {
-                                "region": TARGET_REGION,
-                                "train_start": train_start,
-                                "train_end": train_end,
-                                "level": "Total_Regional",
-                                "forecast_years": forecast_years,
-                                "pred_annual": pred_annual,
-                                "pred_monthly": res["monthly_forecasts"],
-                                "run_parameters": res.get("run_parameters", {}),
-                                "actuals": actuals,
-                                "percent_errors": percent_errors,
-                            }
-                        )
-                
-            # Store results for this region
-            all_results_by_region[TARGET_REGION] = all_results
-
-        print(f"\n✅ LTF SRM Forecast completed: {len(all_results_by_region)} regions")
+                all_results.append(
+                    {
+                        "region": target_region,
+                        "train_start": train_start,
+                        "train_end": train_end,
+                        "level": "SRM_Regional_Plus_Dist",
+                        "forecast_years": forecast_years,
+                        "pred_annual": pred_annual,
+                        "pred_monthly": res["monthly_forecasts"],
+                        "run_parameters": res.get("run_parameters", {}),
+                        "actuals": actuals,
+                        "percent_errors": percent_errors,
+                    }
+                )
+        print(f"\n✅ LTF SRM Forecast completed for {target_region}")
         
         return {
             'status': 'success',
-            'results': all_results_by_region
+            'results': all_results
         }
         
     except Exception as e:
-        print(f"\n❌ LTF SRM Forecast failed: {str(e)}")
+        print(f"\n❌ LTF SRM Forecast failed for {target_region}: {str(e)}")
         import traceback
         traceback.print_exc()
         
         return {
             'status': 'error',
-            'results': {},
+            'results': [],
             'error': str(e)
         }
 
@@ -306,9 +199,23 @@ if __name__ == "__main__":
     # Load configuration from command line or use default
     config_path = sys.argv[1] if len(sys.argv) > 1 else "configs/ltf_srm.yaml"
     
-    # Reload config to create output directories
+    # Load configuration
     config = LongTermForecastConfig.from_yaml(config_path)
+    
+    # Override temporal settings if needed (e.g., latest_year_in_data=2023, horizon=5)
+    latest_year_in_data = 2023
+    horizon = 5
+    if latest_year_in_data is not None:
+        config.temporal.forecast_runs[0] = (
+            config.temporal.forecast_runs[0][0],
+            latest_year_in_data
+        )
+        config.temporal.horizon = horizon if horizon is not None else config.temporal.horizon
+    
     REGIONS = config.data.regions
+    
+    # Initialize DataLoader
+    data_loader = DataLoader(config.project.project_root)
     
     # Create output directories for each region
     output_dirs = {}
@@ -317,32 +224,83 @@ if __name__ == "__main__":
         output_dir.mkdir(parents=True, exist_ok=True)
         output_dirs[TARGET_REGION] = output_dir
     
-    # Run the forecast with use_output_dir=True
-    result = run_ltf_srm_forecast(config_path=config_path, use_output_dir=False, latest_year_in_data=2023, horizon=5)
-    df_prediction = prepare_prediction_output(result['results'])
-    df_prediction.to_csv("ltf_srm.csv", index=False)
+    # Run forecast for each region and collect results
+    all_results_by_region = {}
+    overall_status = 'success'
+    
+    for TARGET_REGION in REGIONS:
+        print(f"Loading data for {TARGET_REGION}...")
+        df_regional, df_features, df_dist, var_cols = data_loader.load_srm_data(
+            db_path=config.project.project_root / config.data.db_path,
+            variable=config.data.target_variable,
+            target_region=TARGET_REGION,
+        )
+        
+        # Compute df_srm (Regional + Distributors)
+        reg_var_col = var_cols["regional"]
+        df_total_regional = (
+            df_regional.groupby([Aliases.ANNEE, Aliases.MOIS])
+            .agg({reg_var_col: 'sum'})
+            .reset_index()
+            .rename(columns={reg_var_col: config.data.target_variable})
+        )
+        
+        if df_dist is not None and len(df_dist) > 0:
+            dist_var_col = var_cols["distributor"]
+            df_all_dist = (
+                df_dist.groupby([Aliases.ANNEE, Aliases.MOIS])
+                .agg({dist_var_col: 'sum'})
+                .reset_index()
+                .rename(columns={dist_var_col: config.data.target_variable})
+            )
+            df_srm = (
+                pd.concat(
+                    [df_total_regional[[Aliases.ANNEE, Aliases.MOIS, config.data.target_variable]],
+                     df_all_dist[[Aliases.ANNEE, Aliases.MOIS, config.data.target_variable]]],
+                    ignore_index=True
+                )
+                .groupby([Aliases.ANNEE, Aliases.MOIS])
+                .agg({config.data.target_variable: 'sum'})
+                .reset_index()
+            )
+        else:
+            df_srm = df_total_regional[[Aliases.ANNEE, Aliases.MOIS, config.data.target_variable]].copy()
+        
+        # Run forecast for this region
+        result = run_ltf_srm_forecast(
+            config=config,
+            target_region=TARGET_REGION,
+            df_regional=df_regional,
+            df_features=df_features,
+            df_srm=df_srm,
+            use_output_dir=False
+        )
+        
+        if result['status'] == 'success':
+            all_results_by_region[TARGET_REGION] = result['results']
+        else:
+            overall_status = 'error'
+            all_results_by_region[TARGET_REGION] = []
+    
     
     # If successful, save outputs to disk
-    # if result['status'] == 'success':
-    #     all_results_by_region = result['results']
+    # for TARGET_REGION, all_results in all_results_by_region.items():
+    #     output_dir = output_dirs[TARGET_REGION]
         
-    #     for TARGET_REGION, all_results in all_results_by_region.items():
-    #         output_dir = output_dirs[TARGET_REGION]
-            
-    #         # Save pickle file
-    #         with open(
-    #             output_dir / f"{clean_name(TARGET_REGION)}_{config.data.target_variable}_{config.project.exp_name}.pkl",
-    #             "wb",
-    #         ) as f:
-    #             pickle.dump(all_results, f)
-            
-    #         # Create and save Excel summary
-    #         df_summary = create_summary_dataframe(all_results)
-    #         out_xlsx = (
-    #             output_dir / f"summary_{clean_name(TARGET_REGION)}_{config.data.target_variable}_{config.project.exp_name}.xlsx"
-    #         )
-    #         df_summary.to_excel(out_xlsx, index=False)
-    #         print(f"\n📁 Saved horizon forecasts to {out_xlsx}")
+    #     # Save pickle file
+    #     with open(
+    #         output_dir / f"{clean_name(TARGET_REGION)}_{config.data.target_variable}_{config.project.exp_name}.pkl",
+    #         "wb",
+    #     ) as f:
+    #         pickle.dump(all_results, f)
+        
+    #     # Create and save Excel summary
+    #     df_summary = create_summary_dataframe(all_results)
+    #     out_xlsx = (
+    #         output_dir / f"summary_{clean_name(TARGET_REGION)}_{config.data.target_variable}_{config.project.exp_name}.xlsx"
+    #     )
+    #     df_summary.to_excel(out_xlsx, index=False)
+    #     print(f"\n📁 Saved horizon forecasts to {out_xlsx}")
     
     # Exit with appropriate code
     sys.exit(0 if result['status'] == 'success' else 1)

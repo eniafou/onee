@@ -1455,7 +1455,6 @@ def run_analysis_for_entity(
     df,
     entity_name,
     df_features,
-    df_monthly=None,
     *,
     config: dict,  # <- everything comes from here
     client_predictions=None,
@@ -1516,6 +1515,15 @@ def run_analysis_for_entity(
     print(f"ANALYZING: {entity_name}")
     print(f"{'='*60}")
 
+    if eval_years_end > df[Aliases.ANNEE].max():
+        if eval_years_end - df[Aliases.ANNEE].max() == 1:
+            last_year_data = df[df[Aliases.ANNEE] == df[Aliases.ANNEE].max()].copy()
+            last_year_data[Aliases.ANNEE] = last_year_data[Aliases.ANNEE] + 1
+            df = pd.concat([df, last_year_data], ignore_index=True)
+        else:
+            raise ValueError(f"eval_years_end {eval_years_end} exceeds available data max year {df[Aliases.ANNEE].max()} by more than 1 year.")
+
+
     move_in_year = get_move_in_year(df)
     if move_in_year is not None:
         move_in_year = move_in_year - 2
@@ -1538,7 +1546,7 @@ def run_analysis_for_entity(
         monthly_matrix=monthly_matrix,
         years=years,
         df_features=df_features,
-        df_monthly=df_monthly if df_monthly is not None else df,
+        df_monthly=df,
         n_pcs=N_PCS,
         lags_options=LAGS_OPTIONS,
         feature_blocks=FEATURE_BLOCKS,
@@ -1555,7 +1563,7 @@ def run_analysis_for_entity(
         monthly_matrix=monthly_matrix,
         years=years,
         df_features=df_features,
-        df_monthly=df_monthly if df_monthly is not None else df,
+        df_monthly=df,
         lags_options=LAGS_OPTIONS,
         feature_blocks=FEATURE_BLOCKS,
         alphas=ALPHAS,
@@ -1570,7 +1578,7 @@ def run_analysis_for_entity(
         monthly_matrix=monthly_matrix,
         years=years,
         df_features=df_features,
-        df_monthly=df_monthly if df_monthly is not None else df,
+        df_monthly=df,
         n_pcs=N_PCS,
         lags_options=LAGS_OPTIONS,
         feature_blocks=FEATURE_BLOCKS,
@@ -1589,7 +1597,7 @@ def run_analysis_for_entity(
         monthly_matrix=monthly_matrix,
         years=years,
         df_features=df_features,
-        df_monthly=df_monthly if df_monthly is not None else df,
+        df_monthly=df,
         feature_blocks=FEATURE_BLOCKS,
         monthly_clients_lookup=clients_lookup,
         use_monthly_clients_options=use_monthly_clients_options,
