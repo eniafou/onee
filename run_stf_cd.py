@@ -283,12 +283,12 @@ def run_stf_cd_forecast(config, df_contrats, df_features):
                     all_results_established.append(result)
 
             all_results_growth = []
-            for contrat in growth_contracts[:0]:
-                all_results_growth.append(handle_growth_entity_prediction(df_contrats, all_results_established, contrat))
+            for contrat in growth_contracts:
+                all_results_growth.append(handle_growth_entity_prediction(df_contrats, all_results_established, contrat, prediction_year = config.evaluation.eval_years_end))
 
             all_results_similarity = []
-            for contrat in similarity_contracts[:0]:
-                all_results_similarity.append(handle_similarity_entity_prediction(df_contrats, all_results_established, contrat))
+            for contrat in similarity_contracts:
+                all_results_similarity.append(handle_similarity_entity_prediction(df_contrats, all_results_established, contrat, prediction_year = config.evaluation.eval_years_end))
             
             all_results_contrats = all_results_established + all_results_similarity + all_results_growth
             all_results += all_results_contrats

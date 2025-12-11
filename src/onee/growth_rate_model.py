@@ -553,8 +553,6 @@ class AugmentedConsensusPrior(PowerGrowthPrior):
             weights = np.power(self.memory_decay, ages)
             
             # Use LinearRegression because it supports sample_weight
-            print("######")
-            print(y_transformed)
             lr_time = LinearRegression()
             lr_time.fit(X_power, y_transformed, sample_weight=weights)
         else:

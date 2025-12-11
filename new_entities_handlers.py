@@ -1,14 +1,7 @@
 import warnings
-
-
 warnings.filterwarnings('ignore')
-
-from kmodes.kprototypes import KPrototypes
 import numpy as np
 from sklearn.neighbors import NearestNeighbors
-
-
-from sklearn.linear_model import Ridge
 from sklearn.preprocessing import StandardScaler
 import numpy as np
 import pandas as pd
@@ -18,19 +11,39 @@ from sklearn.ensemble import RandomForestRegressor
 from sklearn.multioutput import MultiOutputRegressor
 
 
+def _build_monthly_details(prediction_year, actual_monthly, predicted_monthly, error_pct_monthly):
+    """Build monthly_details dict matching run_analysis_for_entity format.
+    
+    Returns a dict: {prediction_year: DataFrame with Month, Actual, Predicted, Error_%}
+    """
+    months = np.arange(1, 13)
+    data = {
+        "Month": months,
+        "Actual": np.asarray(actual_monthly, dtype=float),
+        "Predicted": np.asarray(predicted_monthly, dtype=float),
+        "Error_%": np.asarray(error_pct_monthly, dtype=float),
+    }
+    return {prediction_year: pd.DataFrame(data)}
+
+
 def _extract_pf_pa_ratio_cons(first_year):
     """Extract PF (12), PA (12), optionally PA/PF ratio (12) and consumption (12).
 
     Returns a tuple (pf, pa, ratio, cons).
-    If any series has fewer than 12 months or the combined feature vector sums to 0,
-    returns None.
+    If any series has fewer than 12 months, pads with zeros to ensure length 12.
+    Returns None only if all values sum to 0.
     """
     pf = first_year.sort_values(Aliases.MOIS)[Aliases.PUISSANCE_FACTUREE].fillna(0).values[:12]
     pa = first_year.sort_values(Aliases.MOIS)[Aliases.PUISSANCE_APPELEE].fillna(0).values[:12]
     cons = first_year.sort_values(Aliases.MOIS)[Aliases.CONSOMMATION_KWH].fillna(0).values[:12]
 
-    if len(pf) < 12 or len(pa) < 12 or len(cons) < 12:
-        return None
+    # Pad with zeros if fewer than 12 months
+    if len(pf) < 12:
+        pf = np.pad(pf, (0, 12 - len(pf)), constant_values=0)
+    if len(pa) < 12:
+        pa = np.pad(pa, (0, 12 - len(pa)), constant_values=0)
+    if len(cons) < 12:
+        cons = np.pad(cons, (0, 12 - len(cons)), constant_values=0)
 
     # Compute pa/pf ratio, set to 0 if pf==0
     ratio_pa_pf = np.zeros_like(pf)
@@ -44,7 +57,7 @@ def _extract_pf_pa_ratio_cons(first_year):
     return pf, pa, ratio_pa_pf, cons
 
 
-def _collect_starting_samples(df_scope):
+def _collect_starting_samples(df_scope, prediction_year):
     """Collect training samples (X_list, y_list) from a dataframe scope.
 
     For each contrat in df_scope, find the move-in start year, extract the
@@ -60,7 +73,7 @@ def _collect_starting_samples(df_scope):
             continue
 
         start_year = get_move_in_year(sub)
-        if pd.isna(start_year) or start_year == 2023 or start_year < 2018: 
+        if pd.isna(start_year) or start_year == prediction_year or start_year < 2018: 
             continue
 
         first_year = sub[sub[Aliases.ANNEE] == start_year].copy()
@@ -80,7 +93,7 @@ def _collect_starting_samples(df_scope):
 
     return X_list, y_list
 
-def _collect_starting_samples_growth(df_scope, use_ratio=False):
+def _collect_starting_samples_growth(df_scope, prediction_year, use_ratio=False):
     contrats = df_scope[Aliases.CONTRAT].unique()
     X_list, y_list = [], []
 
@@ -90,7 +103,7 @@ def _collect_starting_samples_growth(df_scope, use_ratio=False):
             continue
 
         start_year = get_move_in_year(sub)
-        if pd.isna(start_year) or (start_year + 1) >= 2023 or start_year < 2018:
+        if pd.isna(start_year) or (start_year + 1) >= prediction_year or start_year < 2018:
             continue
 
         first_year = sub[sub[Aliases.ANNEE] == start_year].copy()
@@ -122,7 +135,7 @@ def _collect_starting_samples_growth(df_scope, use_ratio=False):
 
 
 
-def handle_similarity_entity_prediction(df, all_results_established, entity_id, level_type=None, save_csv = True):
+def handle_similarity_entity_prediction(df, all_results_established, entity_id, prediction_year, level_type=None, save_csv=False):
     """
     Generic handler for similarity entities (prediction_year starters).
     Replaced clustering with a small predictive model:
@@ -138,7 +151,7 @@ def handle_similarity_entity_prediction(df, all_results_established, entity_id, 
     df_entity = df[df[level_type] == entity_id].copy()
     if df_entity.empty:
         print(f"⚠️ {level_type.capitalize()} {entity_id} not found.")
-        return _build_empty_result(df_entity, entity_id, level_type)
+        return _build_empty_result(df_entity, entity_id, prediction_year, level_type)
 
     label = level_type.capitalize()
     print(f"\n🔗 Handling similarity {label}: {entity_id}")
@@ -160,11 +173,11 @@ def handle_similarity_entity_prediction(df, all_results_established, entity_id, 
 
     # --- Extract training samples ---
     # Use helper to collect X_list and y_list (features depend on use_ratio)
-    X_list, y_list = _collect_starting_samples(df_train_scope)
+    X_list, y_list = _collect_starting_samples(df_train_scope, prediction_year)
 
     if len(X_list) < 3:
         print("⚠️ Not enough data to train the model, using all of the data if possible.")
-        X_list, y_list = _collect_starting_samples(df.copy())
+        X_list, y_list = _collect_starting_samples(df.copy(), prediction_year)
 
     X = np.vstack(X_list)
     Y = np.vstack(y_list)
@@ -200,12 +213,12 @@ def handle_similarity_entity_prediction(df, all_results_established, entity_id, 
     first_year_entity = sub_entity[sub_entity[Aliases.ANNEE] == start_year_entity].copy()
     if first_year_entity.empty:
         print(f"⚠️ No data for start year {start_year_entity} for {entity_id}.")
-        return _build_empty_result(df_entity, entity_id, level_type)
+        return _build_empty_result(df_entity, entity_id, prediction_year, level_type)
     # extract features for the target entity (respecting use_ratio)
     res_e = _extract_pf_pa_ratio_cons(first_year_entity)
     if res_e is None:
         print(f"⚠️ Missing PF or PA data for {entity_id}.")
-        return handle_similarity_entity(df, all_results_established, entity_id, level_type, k = 1)
+        return handle_similarity_entity(df, all_results_established, entity_id, prediction_year, level_type, k=1)
 
     pf_e, pa_e, ratio_e, cons_e = res_e
 
@@ -230,58 +243,63 @@ def handle_similarity_entity_prediction(df, all_results_established, entity_id, 
     neg_count = (raw_pred < 0).sum()
     if neg_count:
         print(f"⚠️ {neg_count} negative values were clamped to 0.")
-    predicted_2023 = np.clip(raw_pred, 0, None)
+    predicted_year_cons = np.clip(raw_pred, 0, None)
 
-    print(f"✅ Predicted starting consumption for {entity_id}: {np.round(predicted_2023,2)}")
+    print(f"✅ Predicted starting consumption for {entity_id}: {np.round(predicted_year_cons,2)}")
 
-    # === Compute errors if 2023 actual exists ===
-    actual_2023 = (
-        df_entity[df_entity[Aliases.ANNEE] == 2023]
+    # === Compute errors if prediction_year actual exists ===
+    actual_year_cons = (
+        df_entity[df_entity[Aliases.ANNEE] == prediction_year]
         .sort_values(Aliases.MOIS)[Aliases.CONSOMMATION_KWH]
         .fillna(0)
         .to_numpy()
     )
-    if len(actual_2023) < 12:
-        actual_2023 = np.pad(actual_2023, (0, 12 - len(actual_2023)), constant_values=0)
+    if len(actual_year_cons) < 12:
+        actual_year_cons = np.pad(actual_year_cons, (0, 12 - len(actual_year_cons)), constant_values=0)
 
     with np.errstate(divide="ignore", invalid="ignore"):
         error_pct_monthly = np.where(
-            actual_2023 != 0,
-            ((predicted_2023 - actual_2023) / actual_2023) * 100,
+            actual_year_cons != 0,
+            ((predicted_year_cons - actual_year_cons) / actual_year_cons) * 100,
             np.nan,
         )
 
-    annual_actual = np.float64(actual_2023.sum())
-    annual_pred = np.float64(predicted_2023.sum())
+    annual_actual = np.float64(actual_year_cons.sum())
+    annual_pred = np.float64(predicted_year_cons.sum())
     annual_error_pct = (
         np.nan if annual_actual == 0 else ((annual_pred - annual_actual) / annual_actual) * 100
+    )
+
+    monthly_details = _build_monthly_details(
+        prediction_year, actual_year_cons, predicted_year_cons, error_pct_monthly
     )
 
     result = {
         "entity": f"{label}_{entity_id}",
         "best_model": {
-            "pred_monthly_matrix": np.array([predicted_2023]),
-            "actual_monthly_matrix": np.array([actual_2023]),
+            "pred_monthly_matrix": np.array([predicted_year_cons]),
+            "actual_monthly_matrix": np.array([actual_year_cons]),
             "valid_years": df_entity[Aliases.ANNEE].unique(),
             "strategy": f"Predictive Start Consumption ({label})",
         },
+        "monthly_details": monthly_details,
         "test_years": {
-            "2023_actual_monthly": actual_2023,
-            "2023_predicted_monthly": predicted_2023,
-            "2023_error_pct_monthly": error_pct_monthly,
-            "2023_actual_annual": annual_actual,
-            "2023_predicted_annual": annual_pred,
-            "2023_error_pct_annual": annual_error_pct,
-            "2023_source_match": [],  # no longer based on similarity
+            f"{prediction_year}_actual_monthly": actual_year_cons,
+            f"{prediction_year}_predicted_monthly": predicted_year_cons,
+            f"{prediction_year}_error_pct_monthly": error_pct_monthly,
+            f"{prediction_year}_actual_annual": annual_actual,
+            f"{prediction_year}_predicted_annual": annual_pred,
+            f"{prediction_year}_error_pct_annual": annual_error_pct,
+            f"{prediction_year}_source_match": [],  # no longer based on similarity
         },
     }
 
     print(f"🎯 Completed predictive estimation for {entity_id}")
     return result
 
-def handle_growth_entity_prediction(df, all_results_established, entity_id, level_type=Aliases.CONTRAT, save_csv = True):
+def handle_growth_entity_prediction(df, all_results_established, entity_id, prediction_year, level_type=Aliases.CONTRAT, save_csv=False):
     """
-    Predicts the growth rate of consumption (2023 vs 2022) for a contract or activity
+    Predicts the growth rate of consumption (prediction_year vs prediction_year-1) for a contract or activity
     using a regression model trained on starting contracts' PF & PA features.
     Fallbacks gracefully to handle_growth_entity or empty result when needed.
     """
@@ -291,7 +309,7 @@ def handle_growth_entity_prediction(df, all_results_established, entity_id, leve
     df_entity = df[df[level_type] == entity_id].copy()
     if df_entity.empty:
         print(f"⚠️ {level_type.capitalize()} {entity_id} not found.")
-        return _build_empty_result(df_entity, entity_id, level_type)
+        return _build_empty_result(df_entity, entity_id, prediction_year, level_type)
 
     label = level_type.capitalize()
     print(f"\n🚀 Handling predictive growth {label}: {entity_id}")
@@ -308,11 +326,11 @@ def handle_growth_entity_prediction(df, all_results_established, entity_id, leve
         df_train_scope = df.copy()
 
     # === Prepare training data: PF, PA, growth ===
-    X_list, y_list = _collect_starting_samples_growth(df_train_scope)
+    X_list, y_list = _collect_starting_samples_growth(df_train_scope, prediction_year)
 
     if len(X_list) < 5:
         print("⚠️ Not enough training data for predictive growth in this activity→ fallback to full training.")
-        X_list, y_list = _collect_starting_samples_growth(df.copy())
+        X_list, y_list = _collect_starting_samples_growth(df.copy(), prediction_year)
 
     X = np.vstack(X_list)
     y = np.array(y_list)
@@ -331,12 +349,12 @@ def handle_growth_entity_prediction(df, all_results_established, entity_id, leve
     first_year_entity = sub_entity[sub_entity[Aliases.ANNEE] == start_year_entity].copy()
     if first_year_entity.empty:
         print(f"⚠️ No valid start year data for {entity_id}.")
-        return _build_empty_result(df_entity, entity_id, level_type)
+        return _build_empty_result(df_entity, entity_id, prediction_year, level_type)
 
     res_e = _extract_pf_pa_ratio_cons(first_year_entity)
     if res_e is None:
         print(f"⚠️ Missing PF/PA data for {entity_id}.")
-        return handle_growth_entity(df, all_results_established, entity_id, level_type)
+        return handle_growth_entity(df, all_results_established, entity_id, prediction_year, level_type)
 
     pf_e, pa_e, ratio_e, cons_e = res_e
     X_new = np.concatenate([pf_e, ratio_e]).reshape(1, -1)
@@ -361,19 +379,20 @@ def handle_growth_entity_prediction(df, all_results_established, entity_id, leve
         print(f"💾 Saved training data to {entity_id}_growth_training.csv")
 
     # === Apply predicted growth rate ===
-    actual_2022_current = df_entity[df_entity[Aliases.ANNEE] == 2022][Aliases.CONSOMMATION_KWH].sum()
-    predicted_2023_annual = np.exp(np.log(actual_2022_current + 1e-9) + predicted_growth)
+    prev_year = prediction_year - 1
+    actual_prev_year_current = df_entity[df_entity[Aliases.ANNEE] == prev_year][Aliases.CONSOMMATION_KWH].sum()
+    predicted_year_annual = np.exp(np.log(actual_prev_year_current + 1e-9) + predicted_growth)
 
     # === Reuse monthly shape logic from handle_growth_entity ===
     try:
         if level_type == Aliases.CONTRAT:
-            df_2023 = df[df[Aliases.ANNEE] == 2023]
-            df_2023 = df_2023[df_2023[Aliases.ACTIVITE] == activite]
+            df_pred_year = df[df[Aliases.ANNEE] == prediction_year]
+            df_pred_year = df_pred_year[df_pred_year[Aliases.ACTIVITE] == activite]
         else:
-            df_2023 = df[df[Aliases.ANNEE] == 2023]
+            df_pred_year = df[df[Aliases.ANNEE] == prediction_year]
 
         pivot = (
-            df_2023.pivot_table(
+            df_pred_year.pivot_table(
                 index=level_type,
                 columns=Aliases.MOIS,
                 values=Aliases.PUISSANCE_FACTUREE,
@@ -388,7 +407,7 @@ def handle_growth_entity_prediction(df, all_results_established, entity_id, leve
             knn = NearestNeighbors(n_neighbors=min(3, len(Xp)), metric="euclidean")
             knn.fit(Xp)
             target_vec = (
-                df_entity[df_entity[Aliases.ANNEE] == 2023]
+                df_entity[df_entity[Aliases.ANNEE] == prediction_year]
                 .sort_values(Aliases.MOIS)[Aliases.PUISSANCE_FACTUREE]
                 .fillna(0)
                 .to_numpy()
@@ -407,72 +426,77 @@ def handle_growth_entity_prediction(df, all_results_established, entity_id, leve
                 )
                 if match is not None:
                     best_model = match["best_model"]
-                    idx_2023 = np.where(best_model["valid_years"] == 2023)[0][0]
-                    weighted_mean_curve += w * best_model["pred_monthly_matrix"][idx_2023]
+                    idx_pred_year = np.where(best_model["valid_years"] == prediction_year)[0][0]
+                    weighted_mean_curve += w * best_model["pred_monthly_matrix"][idx_pred_year]
 
             mean_curve_normalized = weighted_mean_curve / (weighted_mean_curve.sum() or 1)
-            predicted_2023_monthly = predicted_2023_annual * mean_curve_normalized
+            predicted_year_monthly = predicted_year_annual * mean_curve_normalized
         else:
-            predicted_2023_monthly = np.repeat(predicted_2023_annual / 12, 12)
+            predicted_year_monthly = np.repeat(predicted_year_annual / 12, 12)
     except Exception as e:
         print(f"⚠️ Failed to compute monthly shape: {e}")
-        predicted_2023_monthly = np.repeat(predicted_2023_annual / 12, 12)
+        predicted_year_monthly = np.repeat(predicted_year_annual / 12, 12)
 
-    # === Compute actuals and errors (same as handle_growth_entity) ===
-    actual_2023 = (
-        df_entity[df_entity[Aliases.ANNEE] == 2023][Aliases.CONSOMMATION_KWH]
+    # === Compute actuals and errors ===
+    actual_year_cons = (
+        df_entity[df_entity[Aliases.ANNEE] == prediction_year][Aliases.CONSOMMATION_KWH]
         .fillna(0)
         .to_numpy()
     )
-    if len(actual_2023) < 12:
-        actual_2023 = np.pad(actual_2023, (0, 12 - len(actual_2023)), constant_values=0)
+    if len(actual_year_cons) < 12:
+        actual_year_cons = np.pad(actual_year_cons, (0, 12 - len(actual_year_cons)), constant_values=0)
 
     with np.errstate(divide="ignore", invalid="ignore"):
         error_pct_monthly = np.where(
-            actual_2023 != 0,
-            ((predicted_2023_monthly - actual_2023) / actual_2023) * 100,
+            actual_year_cons != 0,
+            ((predicted_year_monthly - actual_year_cons) / actual_year_cons) * 100,
             np.nan,
         )
 
-    annual_actual = np.float64(actual_2023.sum())
-    annual_pred = np.float64(predicted_2023_monthly.sum())
+    annual_actual = np.float64(actual_year_cons.sum())
+    annual_pred = np.float64(predicted_year_monthly.sum())
     annual_error_pct = (
         np.nan if annual_actual == 0 else ((annual_pred - annual_actual) / annual_actual) * 100
     )
 
     best_model_new = {
-        "pred_monthly_matrix": np.array([predicted_2023_monthly]),
-        "actual_monthly_matrix": np.array([actual_2023]),
+        "pred_monthly_matrix": np.array([predicted_year_monthly]),
+        "actual_monthly_matrix": np.array([actual_year_cons]),
         "valid_years": df_entity[Aliases.ANNEE].unique(),
         "strategy": f"Predictive - Growth ({label})",
     }
 
+    monthly_details = _build_monthly_details(
+        prediction_year, actual_year_cons, predicted_year_monthly, error_pct_monthly
+    )
+
     result = {
         "entity": f"{label}_{entity_id}",
         "best_model": best_model_new,
+        "monthly_details": monthly_details,
         "test_years": {
-            "2023_actual_monthly": actual_2023,
-            "2023_predicted_monthly": predicted_2023_monthly,
-            "2023_error_pct_monthly": error_pct_monthly,
-            "2023_actual_annual": annual_actual,
-            "2023_predicted_annual": annual_pred,
-            "2023_error_pct_annual": annual_error_pct,
-            "2023_source_match": similar_entities if 'similar_entities' in locals() else [],
+            f"{prediction_year}_actual_monthly": actual_year_cons,
+            f"{prediction_year}_predicted_monthly": predicted_year_monthly,
+            f"{prediction_year}_error_pct_monthly": error_pct_monthly,
+            f"{prediction_year}_actual_annual": annual_actual,
+            f"{prediction_year}_predicted_annual": annual_pred,
+            f"{prediction_year}_error_pct_annual": annual_error_pct,
+            f"{prediction_year}_source_match": similar_entities if 'similar_entities' in locals() else [],
         },
     }
 
-    print(f"✅ Predicted 2023 annual (growth-based): {predicted_2023_annual:,.2f}")
+    print(f"✅ Predicted {prediction_year} annual (growth-based): {predicted_year_annual:,.2f}")
     return result
 
 
-def _build_empty_result(df_entity, entity_id, level_type=Aliases.CONTRAT):
+def _build_empty_result(df_entity, entity_id, prediction_year, level_type=Aliases.CONTRAT):
     """Return a consistent empty result object for similarity contracts."""
-    actual_2023 = (
-        df_entity[df_entity[Aliases.ANNEE] == 2023][Aliases.CONSOMMATION_KWH]
+    actual_year_cons = (
+        df_entity[df_entity[Aliases.ANNEE] == prediction_year][Aliases.CONSOMMATION_KWH]
         .fillna(0)
         .to_numpy()
     )
-    annual_actual = np.float64(actual_2023.sum())
+    annual_actual = np.float64(actual_year_cons.sum())
     nan_arr = np.full(12, np.nan)
 
     best_model = {
@@ -496,26 +520,30 @@ def _build_empty_result(df_entity, entity_id, level_type=Aliases.CONTRAT):
     }
 
     test_years = {
-        '2023_actual_monthly': actual_2023,
-        '2023_predicted_monthly': np.zeros(12),
-        '2023_error_pct_monthly': nan_arr,
-        '2023_actual_annual': annual_actual,
-        '2023_predicted_annual': np.float64(0.0),
-        '2023_error_pct_annual': np.nan,
-        '2023_source_match': None
+        f'{prediction_year}_actual_monthly': actual_year_cons,
+        f'{prediction_year}_predicted_monthly': np.zeros(12),
+        f'{prediction_year}_error_pct_monthly': nan_arr,
+        f'{prediction_year}_actual_annual': annual_actual,
+        f'{prediction_year}_predicted_annual': np.float64(0.0),
+        f'{prediction_year}_error_pct_annual': np.nan,
+        f'{prediction_year}_source_match': None
     }
+
+    monthly_details = _build_monthly_details(
+        prediction_year, actual_year_cons, np.zeros(12), nan_arr
+    )
 
     return {
         "entity": f'{ "Contrat" if level_type == Aliases.CONTRAT else "Activité"}_{entity_id}',
         "best_model": best_model,
         "training_end": None,
-        "monthly_details": {},
+        "monthly_details": monthly_details,
         "test_years": test_years
     }
 
 
 
-def handle_growth_entity(df, all_results_established, entity_id, level_type=Aliases.CONTRAT):
+def handle_growth_entity(df, all_results_established, entity_id, prediction_year, level_type=Aliases.CONTRAT):
     """
     Generic handler for growth entities (either contracts or activities).
     - For contracts: filters within same activity unless no peers exist.
@@ -527,9 +555,10 @@ def handle_growth_entity(df, all_results_established, entity_id, level_type=Alia
     df_entity = df[df[level_type] == entity_id].copy()
     if df_entity.empty:
         print(f"⚠️ {level_type.capitalize()} {entity_id} not found.")
-        return _build_empty_result(df_entity, entity_id, level_type)
+        return _build_empty_result(df_entity, entity_id, prediction_year, level_type)
 
     label = level_type.capitalize()
+    prev_year = prediction_year - 1
     print(f"\n🚀 Handling growth {label}: {entity_id}")
 
     # === Determine comparison subset ===
@@ -540,15 +569,15 @@ def handle_growth_entity(df, all_results_established, entity_id, level_type=Alia
         contrats_in_activity = df_same_activity[Aliases.CONTRAT].unique().tolist()
         if len(contrats_in_activity) <= 1:
             # No other contracts in same activity → use all data
-            df_2023 = df[df[Aliases.ANNEE] == 2023].copy()
+            df_pred_year = df[df[Aliases.ANNEE] == prediction_year].copy()
         else:
-            df_2023 = df_same_activity[df_same_activity[Aliases.ANNEE] == 2023].copy()
+            df_pred_year = df_same_activity[df_same_activity[Aliases.ANNEE] == prediction_year].copy()
     else:
-        df_2023 = df[df[Aliases.ANNEE] == 2023].copy()
+        df_pred_year = df[df[Aliases.ANNEE] == prediction_year].copy()
 
     # === Build pivot for similarity ===
     pivot = (
-        df_2023.pivot_table(
+        df_pred_year.pivot_table(
             index=level_type,
             columns=Aliases.MOIS,
             values=Aliases.PUISSANCE_FACTUREE,
@@ -559,19 +588,19 @@ def handle_growth_entity(df, all_results_established, entity_id, level_type=Alia
     )
 
     if pivot.empty:
-        print(f"⚠️ No comparable 2023 data for {entity_id}.")
-        return _build_empty_result(df_entity, entity_id, level_type)
+        print(f"⚠️ No comparable {prediction_year} data for {entity_id}.")
+        return _build_empty_result(df_entity, entity_id, prediction_year, level_type)
 
     target_vec = (
-        df_entity[df_entity[Aliases.ANNEE] == 2023]
+        df_entity[df_entity[Aliases.ANNEE] == prediction_year]
         .sort_values(Aliases.MOIS)[Aliases.PUISSANCE_FACTUREE]
         .fillna(0)
         .to_numpy()
         .reshape(1, -1)
     )
     if target_vec.size == 0:
-        print(f"⚠️ {label} {entity_id} has no 2023 puissance facturée data.")
-        return _build_empty_result(df_entity, entity_id, level_type)
+        print(f"⚠️ {label} {entity_id} has no {prediction_year} puissance facturée data.")
+        return _build_empty_result(df_entity, entity_id, prediction_year, level_type)
 
     # === Find nearest neighbors ===
     X = pivot.values
@@ -583,7 +612,7 @@ def handle_growth_entity(df, all_results_established, entity_id, level_type=Alia
     similar_entities = [c for c in candidates[indices[0]] if c != entity_id]
     if not similar_entities:
         print(f"⚠️ No similar {level_type}s found for {entity_id}.")
-        return _build_empty_result(df_entity, entity_id, level_type)
+        return _build_empty_result(df_entity, entity_id, prediction_year, level_type)
 
     # === Use top 3 similar entities with weights ===
     top_k = min(3, len(similar_entities))
@@ -614,8 +643,8 @@ def handle_growth_entity(df, all_results_established, entity_id, level_type=Alia
         best_model = match_result["best_model"]
         valid_years = best_model["valid_years"]
         
-        if not (2022 in valid_years and 2023 in valid_years):
-            print(f"⚠️ Matched {match_id} lacks 2022 or 2023 data.")
+        if not (prev_year in valid_years and prediction_year in valid_years):
+            print(f"⚠️ Matched {match_id} lacks {prev_year} or {prediction_year} data.")
             continue
             
         valid_matches.append((match_id, best_model))
@@ -623,7 +652,7 @@ def handle_growth_entity(df, all_results_established, entity_id, level_type=Alia
     
     if not valid_matches:
         print(f"⚠️ No valid matches found with required data.")
-        return _build_empty_result(df_entity, entity_id, level_type)
+        return _build_empty_result(df_entity, entity_id, prediction_year, level_type)
     
     # Renormalize weights for valid matches
     valid_weights = np.array(valid_weights)
@@ -634,82 +663,88 @@ def handle_growth_entity(df, all_results_established, entity_id, level_type=Alia
     
     for (match_id, best_model), weight in zip(valid_matches, valid_weights):
         valid_years = best_model["valid_years"]
-        idx_2022 = np.where(valid_years == 2022)[0][0]
-        idx_2023 = np.where(valid_years == 2023)[0][0]
-        actual_2022 = best_model["actual_monthly_matrix"][idx_2022].sum()
-        predicted_2023_similar = best_model["pred_monthly_matrix"][idx_2023].sum()
+        idx_prev_year = np.where(valid_years == prev_year)[0][0]
+        idx_pred_year = np.where(valid_years == prediction_year)[0][0]
+        actual_prev_year = best_model["actual_monthly_matrix"][idx_prev_year].sum()
+        predicted_year_similar = best_model["pred_monthly_matrix"][idx_pred_year].sum()
         
-        growth_rate = np.log(predicted_2023_similar + 1e-9) - np.log(actual_2022 + 1e-9)
+        growth_rate = np.log(predicted_year_similar + 1e-9) - np.log(actual_prev_year + 1e-9)
         weighted_growth_rate += weight * growth_rate
         print(f"  {match_id}: growth_rate={growth_rate:.4f}, weight={weight:.2f}")
     
     print(f"📈 Weighted growth rate (log): {weighted_growth_rate:.4f}")
 
-    actual_2022_current = df_entity[df_entity[Aliases.ANNEE] == 2022][Aliases.CONSOMMATION_KWH].sum()
-    predicted_2023_annual = np.exp(np.log(actual_2022_current + 1e-9) + weighted_growth_rate)
+    actual_prev_year_current = df_entity[df_entity[Aliases.ANNEE] == prev_year][Aliases.CONSOMMATION_KWH].sum()
+    predicted_year_annual = np.exp(np.log(actual_prev_year_current + 1e-9) + weighted_growth_rate)
 
     # === Compute weighted mean curve ===
     weighted_mean_curve = np.zeros(12)
     
     for (match_id, best_model), weight in zip(valid_matches, valid_weights):
         valid_years = best_model["valid_years"]
-        idx_2023 = np.where(valid_years == 2023)[0][0]
-        mean_curve = best_model["pred_monthly_matrix"][idx_2023]
+        idx_pred_year = np.where(valid_years == prediction_year)[0][0]
+        mean_curve = best_model["pred_monthly_matrix"][idx_pred_year]
         weighted_mean_curve += weight * mean_curve
     
     mean_curve_normalized = weighted_mean_curve / (weighted_mean_curve.sum() or 1)
-    predicted_2023_monthly = predicted_2023_annual * mean_curve_normalized
+    predicted_year_monthly = predicted_year_annual * mean_curve_normalized
 
     # === Compute actuals and errors ===
-    actual_2023 = (
-        df_entity[df_entity[Aliases.ANNEE] == 2023][Aliases.CONSOMMATION_KWH]
+    actual_year_cons = (
+        df_entity[df_entity[Aliases.ANNEE] == prediction_year][Aliases.CONSOMMATION_KWH]
         .fillna(0)
         .to_numpy()
     )
-    if len(actual_2023) < 12:
-        actual_2023 = np.pad(actual_2023, (0, 12 - len(actual_2023)), constant_values=0)
+    if len(actual_year_cons) < 12:
+        actual_year_cons = np.pad(actual_year_cons, (0, 12 - len(actual_year_cons)), constant_values=0)
 
     with np.errstate(divide="ignore", invalid="ignore"):
         error_pct_monthly = np.where(
-            actual_2023 != 0,
-            ((predicted_2023_monthly - actual_2023) / actual_2023) * 100,
+            actual_year_cons != 0,
+            ((predicted_year_monthly - actual_year_cons) / actual_year_cons) * 100,
             np.nan,
         )
 
-    annual_actual = np.float64(actual_2023.sum())
-    annual_pred = np.float64(predicted_2023_monthly.sum())
+    annual_actual = np.float64(actual_year_cons.sum())
+    annual_pred = np.float64(predicted_year_monthly.sum())
     annual_error_pct = (
         np.nan if annual_actual == 0 else ((annual_pred - annual_actual) / annual_actual) * 100
     )
 
     # === Assemble output ===
     best_model_new = {
-        "pred_monthly_matrix": np.array([predicted_2023_monthly]),
-        "actual_monthly_matrix": np.array([actual_2023]),
+        "pred_monthly_matrix": np.array([predicted_year_monthly]),
+        "actual_monthly_matrix": np.array([actual_year_cons]),
         "valid_years": df_entity[Aliases.ANNEE].unique(),
         "strategy": f"Clustering - Growth ({label})",
     }
 
+    monthly_details = _build_monthly_details(
+        prediction_year, actual_year_cons, predicted_year_monthly, error_pct_monthly
+    )
+
     result = {
         "entity": f"{label}_{entity_id}",
         "best_model": best_model_new,
+        "monthly_details": monthly_details,
         "test_years": {
-            "2023_actual_monthly": actual_2023,
-            "2023_predicted_monthly": predicted_2023_monthly,
-            "2023_error_pct_monthly": error_pct_monthly,
-            "2023_actual_annual": annual_actual,
-            "2023_predicted_annual": annual_pred,
-            "2023_error_pct_annual": annual_error_pct,
-            "2023_source_match": [match_id for match_id, _ in valid_matches],
+            f"{prediction_year}_actual_monthly": actual_year_cons,
+            f"{prediction_year}_predicted_monthly": predicted_year_monthly,
+            f"{prediction_year}_error_pct_monthly": error_pct_monthly,
+            f"{prediction_year}_actual_annual": annual_actual,
+            f"{prediction_year}_predicted_annual": annual_pred,
+            f"{prediction_year}_error_pct_annual": annual_error_pct,
+            f"{prediction_year}_source_match": [match_id for match_id, _ in valid_matches],
         },
     }
 
-    print(f"✅ Predicted 2023 annual: {predicted_2023_annual:,.2f}")
+    print(f"✅ Predicted {prediction_year} annual: {predicted_year_annual:,.2f}")
     return result
 
-def handle_similarity_entity(df, all_results_established, entity_id, level_type=Aliases.CONTRAT, k = 3):
+
+def handle_similarity_entity(df, all_results_established, entity_id, prediction_year, level_type=Aliases.CONTRAT, k=3):
     """
-    Generic handler for similarity entities (2023 starters).
+    Generic handler for similarity entities (prediction_year starters).
     - For contracts: filter within same activity (fallback to all if alone).
     - For activities: similarity based on puissance facturée vectors.
     """
@@ -719,7 +754,7 @@ def handle_similarity_entity(df, all_results_established, entity_id, level_type=
     df_entity = df[df[level_type] == entity_id].copy()
     if df_entity.empty:
         print(f"⚠️ {level_type.capitalize()} {entity_id} not found.")
-        return _build_empty_result(df_entity, entity_id, level_type)
+        return _build_empty_result(df_entity, entity_id, prediction_year, level_type)
 
     label = level_type.capitalize()
     print(f"\n🔗 Handling similarity {label}: {entity_id}")
@@ -730,14 +765,14 @@ def handle_similarity_entity(df, all_results_established, entity_id, level_type=
         df_same_activity = df[df[Aliases.ACTIVITE] == activite].copy()
         contrats_in_activity = df_same_activity[Aliases.CONTRAT].unique().tolist()
         if len(contrats_in_activity) <= 1:
-            df_2023 = df[df[Aliases.ANNEE] == 2023].copy()
+            df_pred_year = df[df[Aliases.ANNEE] == prediction_year].copy()
         else:
-            df_2023 = df_same_activity[df_same_activity[Aliases.ANNEE] == 2023].copy()
+            df_pred_year = df_same_activity[df_same_activity[Aliases.ANNEE] == prediction_year].copy()
     else:
-        df_2023 = df[df[Aliases.ANNEE] == 2023].copy()
+        df_pred_year = df[df[Aliases.ANNEE] == prediction_year].copy()
 
     pivot = (
-        df_2023.pivot_table(
+        df_pred_year.pivot_table(
             index=level_type,
             columns=Aliases.MOIS,
             values=Aliases.PUISSANCE_FACTUREE,
@@ -748,19 +783,19 @@ def handle_similarity_entity(df, all_results_established, entity_id, level_type=
     )
 
     if pivot.empty:
-        print(f"⚠️ No comparable 2023 puissance facturée data for {entity_id}.")
-        return _build_empty_result(df_entity, entity_id, level_type)
+        print(f"⚠️ No comparable {prediction_year} puissance facturée data for {entity_id}.")
+        return _build_empty_result(df_entity, entity_id, prediction_year, level_type)
 
     target_vec = (
-        df_entity[df_entity[Aliases.ANNEE] == 2023]
+        df_entity[df_entity[Aliases.ANNEE] == prediction_year]
         .sort_values(Aliases.MOIS)[Aliases.PUISSANCE_FACTUREE]
         .fillna(0)
         .to_numpy()
         .reshape(1, -1)
     )
     if target_vec.sum() == 0:
-        print(f"⚠️ {entity_id} doesn't have any 2023 puissance facturée data.")
-        return _build_empty_result(df_entity, entity_id, level_type)
+        print(f"⚠️ {entity_id} doesn't have any {prediction_year} puissance facturée data.")
+        return _build_empty_result(df_entity, entity_id, prediction_year, level_type)
     
     X = pivot.values
     candidates = pivot.index.to_numpy()
@@ -771,7 +806,7 @@ def handle_similarity_entity(df, all_results_established, entity_id, level_type=
     similar_entities = [c for c in candidates[indices[0]] if c != entity_id]
     if not similar_entities:
         print(f"⚠️ No similar {level_type}s found for {entity_id}.")
-        return _build_empty_result(df_entity, entity_id, level_type)
+        return _build_empty_result(df_entity, entity_id, prediction_year, level_type)
 
     # === Use top k similar entities with weights ===
     top_k = min(k, len(similar_entities))
@@ -800,92 +835,75 @@ def handle_similarity_entity(df, all_results_established, entity_id, level_type=
             continue
 
         best_model = match_result["best_model"]
-        if 2023 not in best_model["valid_years"]:
-            print(f"⚠️ Matched {match_id} has no 2023 predictions.")
+        if prediction_year not in best_model["valid_years"]:
+            print(f"⚠️ Matched {match_id} has no {prediction_year} predictions.")
             continue
 
         valid_matches.append((match_id, best_model))
         valid_weights.append(weights[i])
 
     if not valid_matches:
-        print(f"⚠️ No valid matches found with 2023 predictions.")
-        return _build_empty_result(df_entity, entity_id, level_type)
+        print(f"⚠️ No valid matches found with {prediction_year} predictions.")
+        return _build_empty_result(df_entity, entity_id, prediction_year, level_type)
     
     # Renormalize weights for valid matches
     valid_weights = np.array(valid_weights)
     valid_weights = valid_weights / valid_weights.sum()
 
     # === Compute weighted prediction ===
-    predicted_2023 = np.zeros(12)
+    predicted_year_cons = np.zeros(12)
     
     for (match_id, best_model), weight in zip(valid_matches, valid_weights):
-        idx_2023 = np.where(best_model["valid_years"] == 2023)[0][0]
-        pred_monthly = best_model["pred_monthly_matrix"][idx_2023]
-        predicted_2023 += weight * pred_monthly
+        idx_pred_year = np.where(best_model["valid_years"] == prediction_year)[0][0]
+        pred_monthly = best_model["pred_monthly_matrix"][idx_pred_year]
+        predicted_year_cons += weight * pred_monthly
         print(f"  {match_id}: weight={weight:.2f}")
 
-    actual_2023 = (
-        df_entity[df_entity[Aliases.ANNEE] == 2023]
+    actual_year_cons = (
+        df_entity[df_entity[Aliases.ANNEE] == prediction_year]
         .sort_values(Aliases.MOIS)[Aliases.CONSOMMATION_KWH]
         .fillna(0)
         .to_numpy()
     )
-    if len(actual_2023) < 12:
-        actual_2023 = np.pad(actual_2023, (0, 12 - len(actual_2023)), constant_values=0)
+    if len(actual_year_cons) < 12:
+        actual_year_cons = np.pad(actual_year_cons, (0, 12 - len(actual_year_cons)), constant_values=0)
 
     with np.errstate(divide="ignore", invalid="ignore"):
         error_pct_monthly = np.where(
-            actual_2023 != 0,
-            ((predicted_2023 - actual_2023) / actual_2023) * 100,
+            actual_year_cons != 0,
+            ((predicted_year_cons - actual_year_cons) / actual_year_cons) * 100,
             np.nan,
         )
 
-    annual_actual = np.float64(actual_2023.sum())
-    annual_pred = np.float64(predicted_2023.sum())
+    annual_actual = np.float64(actual_year_cons.sum())
+    annual_pred = np.float64(predicted_year_cons.sum())
     annual_error_pct = (
         np.nan if annual_actual == 0 else ((annual_pred - annual_actual) / annual_actual) * 100
+    )
+
+    monthly_details = _build_monthly_details(
+        prediction_year, actual_year_cons, predicted_year_cons, error_pct_monthly
     )
 
     result = {
         "entity": f"{label}_{entity_id}",
         "best_model": {
-            "pred_monthly_matrix": np.array([predicted_2023]),
-            "actual_monthly_matrix": np.array([actual_2023]),
+            "pred_monthly_matrix": np.array([predicted_year_cons]),
+            "actual_monthly_matrix": np.array([actual_year_cons]),
             "valid_years": df_entity[Aliases.ANNEE].unique(),
             "strategy": f"Clustering - Similarity ({label})",
         },
+        "monthly_details": monthly_details,
         "test_years": {
-            "2023_actual_monthly": actual_2023,
-            "2023_predicted_monthly": predicted_2023,
-            "2023_error_pct_monthly": error_pct_monthly,
-            "2023_actual_annual": annual_actual,
-            "2023_predicted_annual": annual_pred,
-            "2023_error_pct_annual": annual_error_pct,
-            "2023_source_match": [match_id for match_id, _ in valid_matches],
+            f"{prediction_year}_actual_monthly": actual_year_cons,
+            f"{prediction_year}_predicted_monthly": predicted_year_cons,
+            f"{prediction_year}_error_pct_monthly": error_pct_monthly,
+            f"{prediction_year}_actual_annual": annual_actual,
+            f"{prediction_year}_predicted_annual": annual_pred,
+            f"{prediction_year}_error_pct_annual": annual_error_pct,
+            f"{prediction_year}_source_match": [match_id for match_id, _ in valid_matches],
         },
     }
 
-    print(f"🔁 Reused weighted 2023 predictions from {len(valid_matches)} {label}(s)")
+    print(f"🔁 Reused weighted {prediction_year} predictions from {len(valid_matches)} {label}(s)")
     return result
-
-
-
-def filter_established_entities(all_results, growth_entities, similarity_entities, level_type=Aliases.CONTRAT):
-    if level_type not in [Aliases.CONTRAT, Aliases.ACTIVITE]:
-        raise ValueError(f"level_type must be either '{Aliases.CONTRAT}' or '{Aliases.ACTIVITE}'.")
-
-    prefix = "Contrat" if level_type == Aliases.CONTRAT else "Activité"
-
-    # --- Variable part: construct exclusion set ---
-    excluded_entities = {
-        f"{prefix}_{eid}" for eid in list(growth_entities) + list(similarity_entities)
-    }
-
-    # --- Fixed part: filter results ---
-    filtered = [r for r in all_results if r.get("entity") not in excluded_entities]
-
-    print(
-        f"🧹 Removed {len(all_results) - len(filtered)} non-established {level_type}s "
-        f"({len(filtered)} remaining)."
-    )
-    return filtered

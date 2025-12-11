@@ -78,6 +78,7 @@ def append_forecast(df_forecast: pd.DataFrame, df_srm: pd.DataFrame,
     
     This function updates existing records or appends new ones based on forecast data.
     For "Total" activity, updates df_srm. For other activities, updates df_regional.
+    Only activities present in df_forecast are included in the output.
     
     Args:
         df_forecast: DataFrame with forecast results (must have Year, Month, Activity, target_variable columns)
@@ -91,6 +92,17 @@ def append_forecast(df_forecast: pd.DataFrame, df_srm: pd.DataFrame,
     # Work with copies to avoid modifying original DataFrames unexpectedly
     df_srm = df_srm.copy()
     df_regional = df_regional.copy()
+    
+    # Get unique activities from df_forecast
+    forecast_activities = df_forecast[Aliases.ACTIVITE].unique()
+    
+    # Filter df_regional to only include activities present in df_forecast
+    non_total_activities = [a for a in forecast_activities if a != "Total"]
+    if non_total_activities:
+        df_regional = df_regional[df_regional[Aliases.ACTIVITE].isin(non_total_activities)]
+    else:
+        # No non-Total activities in forecast, return empty regional
+        df_regional = df_regional.iloc[0:0]
     
     for _, row in df_forecast.iterrows():
         year = row[Aliases.ANNEE]

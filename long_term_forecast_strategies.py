@@ -300,9 +300,6 @@ def run_long_horizon_forecast(
     )
     BestModelClass = best_result["model_class"]
 
-    print("fitted params:")
-    print(best_result["model_config"]["fitted_params"])
-
     growth_model = BestModelClass(
         **best_result["model_config"]["hyper_params"]
     )
