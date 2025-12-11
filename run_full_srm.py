@@ -150,8 +150,7 @@ def correct_prediction_with_existant(df_forecast: pd.DataFrame, df_existant: pd.
     df_corrected = df_forecast.copy()
     
     # Get unique activities from forecast
-    activity_groups = df_corrected.groupby([Aliases.ACTIVITE])
-    
+    activity_groups = df_corrected.groupby(Aliases.ACTIVITE)
     for activite, group_forecast in activity_groups:
         # Filter existing data for this specific activity
         mask_existant = (df_existant[Aliases.ACTIVITE] == activite)
