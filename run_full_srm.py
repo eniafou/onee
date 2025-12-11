@@ -130,7 +130,7 @@ def append_forecast(df_forecast: pd.DataFrame, df_srm: pd.DataFrame,
     return df_srm, df_regional
 
 
-def correct_prediction_with_existant_srm(df_forecast: pd.DataFrame, df_existant: pd.DataFrame, 
+def correct_prediction_with_existant(df_forecast: pd.DataFrame, df_existant: pd.DataFrame, 
                                          target_variable: str) -> pd.DataFrame:
     """
     Correct SRM forecast predictions using existing data.
