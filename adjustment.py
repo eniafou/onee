@@ -122,6 +122,110 @@ def weather_adjustment(df_weather_diff: pd.DataFrame, db_path: Path) -> pd.DataF
     return df_output
 
 
+def _get_learned_growth_rate(df_prediction: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calculate the learned growth rate per region from historical predictions.
+    
+    Parameters:
+    -----------
+    df_prediction : DataFrame
+        Predictions with columns: region, annee, consommation_kwh
+        
+    Returns:
+    --------
+    DataFrame with columns: region, learned_growth_rate
+    """
+    df = df_prediction.sort_values([Aliases.REGION, Aliases.ANNEE]).copy()
+    
+    # Calculate year-over-year growth rate per region
+    df['prev_consommation'] = df.groupby(Aliases.REGION)[Aliases.CONSOMMATION_KWH].shift(1)
+    df['growth_rate'] = (df[Aliases.CONSOMMATION_KWH] - df['prev_consommation']) / df['prev_consommation']
+    
+    # Average growth rate per region (excluding NaN from first year)
+    df_growth = (
+        df.groupby(Aliases.REGION)['growth_rate']
+        .mean()
+        .reset_index()
+        .rename(columns={'growth_rate': 'learned_growth_rate'})
+    )
+    
+    return df_growth
+
+
+def ev_adjustment(df_ev: pd.DataFrame, df_prediction: pd.DataFrame) -> pd.DataFrame:
+    """
+    Calculate EV-based corrections per region and year.
+    
+    The correction accounts for EV growth beyond what's already captured
+    in the learned growth rate from predictions.
+    
+    Formula: correction = ev(year) - ev(year-1) * (1 + learned_growth_rate)
+    
+    Note: df_ev may contain more years than df_prediction (including historical years).
+    The previous year's EV value is taken from df_ev, which allows computing corrections
+    even for the first prediction year. The output only includes years present in df_prediction.
+    
+    Parameters:
+    -----------
+    df_ev : DataFrame
+        EV data with columns: region, annee, ev.
+        Must contain all years in df_prediction, and may contain additional historical years
+        needed for computing the previous year's EV value.
+    df_prediction : DataFrame
+        Predictions with columns: region, annee, consommation_kwh.
+        All years in df_prediction must be present in df_ev.
+        
+    Returns:
+    --------
+    DataFrame with columns: region, annee, correction
+        Only includes years that are present in df_prediction.
+        
+    Raises:
+    -------
+    ValueError
+        If df_prediction contains years not present in df_ev.
+    """
+    # Validate that all prediction years are in df_ev
+    prediction_years = set(df_prediction[Aliases.ANNEE].unique())
+    ev_years = set(df_ev[Aliases.ANNEE].unique())
+    missing_years = prediction_years - ev_years
+    if missing_years:
+        raise ValueError(
+            f"df_prediction contains years not present in df_ev: {sorted(missing_years)}. "
+            f"df_ev years: {sorted(ev_years)}, df_prediction years: {sorted(prediction_years)}"
+        )
+    
+    # Get learned growth rate per region
+    df_growth = _get_learned_growth_rate(df_prediction)
+    
+    # Sort and prepare EV data
+    df_ev_sorted = df_ev.sort_values([Aliases.REGION, Aliases.ANNEE]).copy()
+    
+    # Get previous year's EV value per region
+    df_ev_sorted['ev_prev'] = df_ev_sorted.groupby(Aliases.REGION)['ev'].shift(1)
+    
+    # Merge with learned growth rates
+    df_merged = df_ev_sorted.merge(df_growth, on=Aliases.REGION, how='left')
+    
+    # Fill missing growth rates with 0 (for regions not in predictions)
+    df_merged['learned_growth_rate'] = df_merged['learned_growth_rate'].fillna(0)
+    
+    # Calculate correction: ev(year) - ev(year-1) * (1 + learned_growth_rate)
+    df_merged['correction'] = (
+        df_merged['ev'] - df_merged['ev_prev'] * (1 + df_merged['learned_growth_rate'])
+    )
+    # For rows without previous year in df_ev, correction is 0
+    df_merged['correction'] = df_merged['correction'].fillna(0)
+    
+    # Filter to only include years in df_prediction
+    df_output = df_merged[df_merged[Aliases.ANNEE].isin(prediction_years)].copy()
+    
+    # Select output columns
+    df_output = df_output[[Aliases.REGION, Aliases.ANNEE, 'correction']].copy()
+    
+    return df_output
+
+
 if __name__ == "__main__":
     # Test with mock data
     from pathlib import Path
@@ -151,3 +255,40 @@ if __name__ == "__main__":
     
     print("Weather adjustment results:")
     print(df_result)
+    
+    print("\n" + "="*50)
+    print("Testing ev_adjustment")
+    print("="*50 + "\n")
+    
+    # Create mock df_ev with historical + prediction years
+    # EV data includes 2022, 2023 (historical) + 2024, 2025, 2026 (prediction years)
+    df_ev = pd.DataFrame({
+        Aliases.REGION: [
+            'Casablanca-Settat', 'Casablanca-Settat', 'Casablanca-Settat', 'Casablanca-Settat', 'Casablanca-Settat',
+            'Rabat-Salé-Kénitra', 'Rabat-Salé-Kénitra', 'Rabat-Salé-Kénitra', 'Rabat-Salé-Kénitra', 'Rabat-Salé-Kénitra',
+        ],
+        Aliases.ANNEE: [2022, 2023, 2024, 2025, 2026, 2022, 2023, 2024, 2025, 2026],
+        'ev': [1000, 1500, 2500, 4000, 6000, 500, 800, 1300, 2000, 3000],
+    })
+    
+    # Create mock df_prediction (only prediction years: 2024, 2025, 2026)
+    df_prediction = pd.DataFrame({
+        Aliases.REGION: [
+            'Casablanca-Settat', 'Casablanca-Settat', 'Casablanca-Settat',
+            'Rabat-Salé-Kénitra', 'Rabat-Salé-Kénitra', 'Rabat-Salé-Kénitra',
+        ],
+        Aliases.ANNEE: [2024, 2025, 2026, 2024, 2025, 2026],
+        Aliases.CONSOMMATION_KWH: [1000000, 1050000, 1100000, 500000, 525000, 550000],
+    })
+    
+    print("Mock df_ev (includes historical years 2022-2023):")
+    print(df_ev)
+    print("\nMock df_prediction (only prediction years 2024-2026):")
+    print(df_prediction)
+    print("\n" + "-"*50 + "\n")
+    
+    # Run the EV adjustment
+    df_ev_result = ev_adjustment(df_ev, df_prediction)
+    
+    print("EV adjustment results (only prediction years):")
+    print(df_ev_result)

@@ -530,7 +530,7 @@ def run_full_forecast_srm(regions_override: dict | None = None) -> tuple[pd.Data
 
 if __name__ == "__main__":
     df_stf, df_ltf = run_full_forecast_srm()
-    df_stf.to_csv("stf_srm_results.csv", index=False)
-    df_ltf.to_csv("ltf_srm_results.csv", index=False)
+    df_stf.to_csv("stf_srm_results.csv", index=False, encoding="utf-8-sig")
+    df_ltf.to_csv("ltf_srm_results.csv", index=False, encoding="utf-8-sig")
     print(f"STF results saved: {len(df_stf)} rows")
     print(f"LTF results saved: {len(df_ltf)} rows")
