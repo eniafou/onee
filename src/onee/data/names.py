@@ -17,7 +17,7 @@ class Tables:
     GRD = "GRD"
     EXOGENOUS_DATA = "Exogenous_Data"
     CD = "CD"
-    ACTIVE_CONTRATS_FEATURES = "Active_Contrats_Features"
+    WEATHER = "Weather"
 
     STF_SRM_RESULTS = "STF_SRM_Results"
     STF_CD_RESULTS = "STF_CD_Results"
@@ -53,6 +53,20 @@ class ExogenousColumns:
     PRIMAIRE = "Primaire"
     SECONDAIRE = "Secondaire"
     TERTIAIRE = "Tertiaire"
+
+
+# ============================================================================
+# Column Names - Weather Table
+# ============================================================================
+
+class WeatherColumns:
+    """Column names for Weather table."""
+    REGION = "Region"
+    YEAR = "Year"
+    MONTH = "Month"
+    APPARENT_TEMPERATURE_MIN = "apparent_temperature_min"
+    PRECIPITATION_SUM = "precipitation_sum"
+    ET0_FAO_EVAPOTRANSPIRATION_SUM = "et0_fao_evapotranspiration_sum"
 
 
 # ============================================================================
@@ -170,6 +184,24 @@ class Aliases:
     # Date fields
     DATE_EMMENAGEMENT = "date_emmenagement"
     DATE_DEMENAGEMENT = "date_demenagement"
+    
+    # Weather sensitivity coefficients
+    COEF_TEMP_MIN = "coef_temp_min"
+    COEF_PRECIPITATION = "coef_precipitation"
+    COEF_ET0 = "coef_et0"
+    PCT_CONTRIBUTION = "pct_contribution"
+    IMPLICIT_INTERCEPT = "implicit_intercept"
+    
+    # Weather variables
+    TEMP_MIN_DIFF = "temp_min_diff"
+    PRECIPITATION_SUM_DIFF = "precipitation_sum_diff"
+    ET0_DIFF = "et0_diff"
+    TEMP_MIN_LATEST = "temp_min_latest"
+    PRECIPITATION_SUM_LATEST = "precipitation_sum_latest"
+    ET0_LATEST = "et0_latest"
+    TEMP_MIN_CORRECTION = "temp_min_correction"
+    PRECIPITATION_SUM_CORRECTION = "precipitation_sum_correction"
+    ET0_CORRECTION = "et0_correction"
     
     # Activity features
     TOTAL_ACTIVE_CONTRATS = "total_active_contrats"

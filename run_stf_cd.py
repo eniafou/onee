@@ -9,7 +9,10 @@ import pickle
 from onee.config.stf_config import ShortTermForecastConfig
 from onee.data.loader import DataLoader
 from onee.data.names import Aliases
-
+import joblib
+from full_forecast_utils import (
+    rename_to_stf_cd_results,
+)
 warnings.filterwarnings('ignore')
 
 def prepare_prediction_output(all_results, df_contrats):
@@ -344,24 +347,30 @@ if __name__ == "__main__":
     
     # Run the forecast with config and data
     result = run_stf_cd_forecast(config=config, df_contrats=df_contrats, df_features=df_features)
-    
-    # If successful, save outputs to disk
-    if result['status'] == 'success':
-        all_results = result['results']
-        
-        output_file = output_dir / f'{exp_name}.xlsx'
-        monthly_output_file = output_dir / f'{exp_name}_monthly_forcasts.xlsx'
-        
-        save_summary(all_results, output_file, monthly_output_file)
-        
-        with open(output_dir / f'all_results_{exp_name}.pkl', "wb") as f:
-            pickle.dump(all_results, f)
+    joblib.dump(result, 'result_stf_cd.joblib')
+    df_prediction = prepare_prediction_output(result['results'])
+    final_df = prepare_ca_output(df_prediction, df_contrats)
+    final_df = rename_to_stf_cd_results(final_df)
+    final_df.to_csv("stf_cd_results.csv", index=False, encoding="utf-8-sig")
 
-        print(f"\n{'='*60}")
-        print(f"✅ Results saved to: {output_file}")
-        print(f"📊 Total entities analyzed: {len(all_results)}")
-        print(f"🔒 ZERO DATA LEAKAGE GUARANTEED")
-        print(f"{'='*60}\n")
+
+    # # If successful, save outputs to disk
+    # if result['status'] == 'success':
+    #     all_results = result['results']
+        
+    #     output_file = output_dir / f'{exp_name}.xlsx'
+    #     monthly_output_file = output_dir / f'{exp_name}_monthly_forcasts.xlsx'
+        
+    #     save_summary(all_results, output_file, monthly_output_file)
+        
+    #     with open(output_dir / f'all_results_{exp_name}.pkl', "wb") as f:
+    #         pickle.dump(all_results, f)
+
+    #     print(f"\n{'='*60}")
+    #     print(f"✅ Results saved to: {output_file}")
+    #     print(f"📊 Total entities analyzed: {len(all_results)}")
+    #     print(f"🔒 ZERO DATA LEAKAGE GUARANTEED")
+    #     print(f"{'='*60}\n")
     
     # Exit with appropriate code
     sys.exit(0 if result['status'] == 'success' else 1)

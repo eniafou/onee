@@ -2,8 +2,6 @@
 # run_horizon_forecast_cd.py (Clean + Correct)
 # ─────────────────────────────────────────────────────────────
 
-import os
-import run_stf_srm
 from short_term_forecast_strategies import (
     create_monthly_matrix,
 )
@@ -17,7 +15,10 @@ import numpy as np
 import pandas as pd
 import warnings
 import sys
-
+import joblib
+from full_forecast_utils import (
+    rename_to_stf_cd_results,
+)
 warnings.filterwarnings("ignore")
 
 # ─────────────────────────────────────────────────────────────
@@ -376,9 +377,11 @@ if __name__ == "__main__":
     
     # Run the forecast with config, data, and output_dir
     result = run_ltf_cd_forecast(config=config, df_contrats=df_contrats, df_features=df_features, output_dir=None)
+    joblib.dump(result, 'result_ltf_cd.joblib')
     df_prediction = prepare_prediction_output(result['results'])
     final_df = prepare_ca_output(df_prediction, df_contrats)
-    final_df.to_csv("ltf_cd_results.csv", index=False)
+    final_df = rename_to_stf_cd_results(final_df)
+    final_df.to_csv("ltf_cd_results.csv", index=False, encoding="utf-8-sig")
     # If successful, save outputs to disk
     # if result['status'] == 'success':
     #     all_results = result['results']

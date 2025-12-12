@@ -15,7 +15,7 @@ import pandas as pd
 
 from onee.utils import clean_name, require_columns
 from onee.data.names import (
-    Tables, GRDColumns, ExogenousColumns, CDColumns,
+    Tables, GRDColumns, ExogenousColumns, CDColumns, WeatherColumns,
     Aliases, GRDValues, build_variable_specs
 )
 from onee.utils import get_move_in_year, get_move_out_year
@@ -538,3 +538,86 @@ class DataLoader:
         
         if combined:
             lookup[target_name] = combined
+
+    # ============================================================================
+    # Weather Data Loading
+    # ============================================================================
+    
+    def load_weather_data(
+        self,
+        db_path: Path,
+    ) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        """
+        Load weather data from the database and compute monthly and yearly aggregates.
+        
+        Args:
+            db_path: Path to database containing Weather table
+            
+        Returns:
+            Tuple of (df_weather_daily, df_weather_monthly, df_weather_yearly)
+            All DataFrames use standard aliases for column names.
+        """
+        db = self._connect_db(db_path)
+        
+        query = f"""
+            SELECT
+                {WeatherColumns.REGION} as {Aliases.REGION},
+                {WeatherColumns.YEAR} as {Aliases.ANNEE},
+                {WeatherColumns.MONTH} as {Aliases.MOIS},
+                {WeatherColumns.APPARENT_TEMPERATURE_MIN} as {Aliases.TEMP_MIN_LATEST},
+                {WeatherColumns.PRECIPITATION_SUM} as {Aliases.PRECIPITATION_SUM_LATEST},
+                {WeatherColumns.ET0_FAO_EVAPOTRANSPIRATION_SUM} as {Aliases.ET0_LATEST}
+            FROM {Tables.WEATHER}
+        """
+        
+        df_weather_daily = pd.read_sql_query(query, db)
+        db.close()
+        
+        # Compute monthly aggregates
+        df_weather_monthly = (
+            df_weather_daily
+            .groupby([Aliases.REGION, Aliases.ANNEE, Aliases.MOIS], as_index=False)
+            .agg({
+                Aliases.TEMP_MIN_LATEST: "mean",
+                Aliases.PRECIPITATION_SUM_LATEST: "sum",
+                Aliases.ET0_LATEST: "sum"
+            })
+        )
+        
+        # Compute yearly aggregates
+        df_weather_yearly = (
+            df_weather_monthly
+            .groupby([Aliases.REGION, Aliases.ANNEE], as_index=False)
+            .agg({
+                Aliases.TEMP_MIN_LATEST: "mean",
+                Aliases.PRECIPITATION_SUM_LATEST: "sum",
+                Aliases.ET0_LATEST: "sum"
+            })
+        )
+        
+        return df_weather_daily, df_weather_monthly, df_weather_yearly
+    
+    def load_weather_latest(
+        self,
+        db_path: Path,
+    ) -> pd.DataFrame:
+        """
+        Load the latest year's weather values per region.
+        
+        Args:
+            db_path: Path to database containing Weather table
+            
+        Returns:
+            DataFrame with columns: region, temp_min_latest, precipitation_sum_latest, et0_latest
+            (one row per region, using the most recent year's data)
+        """
+        _, _, df_weather_yearly = self.load_weather_data(db_path)
+        
+        # Get the latest year for each region
+        idx = df_weather_yearly.groupby(Aliases.REGION)[Aliases.ANNEE].idxmax()
+        df_latest = df_weather_yearly.loc[idx].copy()
+        
+        # Drop the year column as we only need the latest values
+        df_latest = df_latest.drop(columns=[Aliases.ANNEE])
+        
+        return df_latest
