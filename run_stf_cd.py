@@ -348,7 +348,8 @@ if __name__ == "__main__":
     # Run the forecast with config and data
     result = run_stf_cd_forecast(config=config, df_contrats=df_contrats, df_features=df_features)
     joblib.dump(result, 'result_stf_cd.joblib')
-    df_prediction = prepare_prediction_output(result['results'])
+    # result = joblib.load('result_stf_cd.joblib')
+    df_prediction = prepare_prediction_output(result['results'], df_contrats)
     final_df = prepare_ca_output(df_prediction, df_contrats)
     final_df = rename_to_stf_cd_results(final_df)
     final_df.to_csv("stf_cd_results.csv", index=False, encoding="utf-8-sig")
