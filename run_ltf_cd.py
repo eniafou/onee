@@ -84,6 +84,18 @@ def prepare_ca_output(df_prediction, df_contrats):
     )
     contract_lookup = contract_info.set_index(Aliases.CONTRAT).to_dict('index')
     
+    # Build historical yearly consumption lookup by (activity, year) for safety net
+    # Used to replace negative predictions with last year's actual value
+    historical_yearly_consumption = (
+        df_contrats
+        .groupby([Aliases.ACTIVITE, Aliases.ANNEE], as_index=False)
+        .agg({Aliases.CONSOMMATION_KWH: 'sum'})
+    )
+    historical_consumption_lookup = {
+        (row[Aliases.ACTIVITE], row[Aliases.ANNEE]): row[Aliases.CONSOMMATION_KWH]
+        for _, row in historical_yearly_consumption.iterrows()
+    }
+    
     # Aggregate df_contrats by year (sum monthly values per contract per year)
     contrats_yearly = df_contrats.groupby(
         [Aliases.CONTRAT, Aliases.ANNEE], as_index=False
@@ -110,6 +122,16 @@ def prepare_ca_output(df_prediction, df_contrats):
         activity = pred_row[Aliases.ACTIVITE]
         year = pred_row[Aliases.ANNEE]
         total_consumption = pred_row[Aliases.CONSOMMATION_KWH]
+        
+        # Safety net: if predicted consumption is negative, use last year's value
+        if total_consumption < 0:
+            last_year_key = (activity, year - 1)
+            fallback_value = historical_consumption_lookup.get(last_year_key)
+            if fallback_value is not None and fallback_value >= 0:
+                total_consumption = fallback_value
+            else:
+                # If no valid last year data, use 0 as last resort
+                total_consumption = 0
         
         # Find all contracts for this activity that are still operating (move_out_year >= year)
         active_contracts = []

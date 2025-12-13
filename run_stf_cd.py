@@ -45,6 +45,13 @@ def prepare_prediction_output(all_results, df_contrats):
     )
     contract_lookup = contract_info.set_index(Aliases.CONTRAT).to_dict('index')
     
+    # Build a lookup for historical consumption by (contrat, year, month)
+    # Used as a safety net for negative predictions
+    historical_consumption = {}
+    for _, row in df_contrats.iterrows():
+        key = (row[Aliases.CONTRAT], row[Aliases.ANNEE], row[Aliases.MOIS])
+        historical_consumption[key] = row[Aliases.CONSOMMATION_KWH]
+    
     for result in all_results:
         if result is None:
             continue
@@ -82,6 +89,16 @@ def prepare_prediction_output(all_results, df_contrats):
                 
                 if month is None or predicted is None:
                     continue
+                
+                # Safety net: if predicted consumption is negative, use last year's value
+                if predicted < 0:
+                    last_year_key = (contrat, year - 1, int(month))
+                    fallback_value = historical_consumption.get(last_year_key)
+                    if fallback_value is not None and fallback_value >= 0:
+                        predicted = fallback_value
+                    else:
+                        # If no valid last year data, use 0 as last resort
+                        predicted = 0
                 
                 records.append({
                     Aliases.REGION: region,

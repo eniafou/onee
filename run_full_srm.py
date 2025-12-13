@@ -19,9 +19,9 @@ from full_forecast_utils import (
 
 
 def compute_df_srm(df_regional: pd.DataFrame, df_dist: pd.DataFrame | None, 
-                   var_cols: dict, target_variable: str) -> pd.DataFrame:
+                   var_cols: dict, target_variable: str) -> tuple[pd.DataFrame, pd.DataFrame]:
     """
-    Compute df_srm (Regional + Distributors combined).
+    Compute df_srm (Regional + Distributors combined) and update df_regional with distributors.
     
     Args:
         df_regional: Regional DataFrame
@@ -30,9 +30,13 @@ def compute_df_srm(df_regional: pd.DataFrame, df_dist: pd.DataFrame | None,
         target_variable: Name of the target variable column
         
     Returns:
-        DataFrame with [Annee, Mois, target_variable] columns
+        Tuple of (df_regional_updated, df_srm) where:
+        - df_regional_updated: Regional data with "All distributers" added as a new activity (if distributors exist)
+        - df_srm: DataFrame with [Annee, Mois, target_variable] columns (Regional + Distributors combined)
     """
     reg_var_col = var_cols["regional"]
+    df_regional_updated = df_regional.copy()
+    
     df_total_regional = (
         df_regional.groupby([Aliases.ANNEE, Aliases.MOIS])
         .agg({reg_var_col: 'sum'})
@@ -48,6 +52,14 @@ def compute_df_srm(df_regional: pd.DataFrame, df_dist: pd.DataFrame | None,
             .reset_index()
             .rename(columns={dist_var_col: target_variable})
         )
+        
+        # Add distributors as a new activity in df_regional
+        df_dist_as_activity = df_all_dist.copy()
+        df_dist_as_activity[Aliases.ACTIVITE] = "All distributers"
+        df_dist_as_activity = df_dist_as_activity.rename(columns={target_variable: reg_var_col})
+        df_regional_updated = pd.concat([df_regional_updated, df_dist_as_activity], ignore_index=True)
+        
+        # Compute combined SRM
         df_srm = (
             pd.concat(
                 [df_total_regional[[Aliases.ANNEE, Aliases.MOIS, target_variable]],
@@ -61,7 +73,7 @@ def compute_df_srm(df_regional: pd.DataFrame, df_dist: pd.DataFrame | None,
     else:
         df_srm = df_total_regional[[Aliases.ANNEE, Aliases.MOIS, target_variable]].copy()
     
-    return df_srm
+    return df_regional_updated, df_srm
 
 
 def append_forecast(df_forecast: pd.DataFrame, df_srm: pd.DataFrame, 
@@ -271,7 +283,9 @@ def _process_stf_result(result: dict, target_region: str) -> pd.DataFrame | None
         Formatted DataFrame or None if result failed
     """
     if result.get('status') == 'success':
-        return prepare_prediction_output_stf(target_region, result['results'])
+        df_prediction = prepare_prediction_output_stf(target_region, result['results'])
+        df_prediction = df_prediction[df_prediction[Aliases.ACTIVITE] == "Total"]
+        return df_prediction
     return None
 
 
@@ -398,9 +412,14 @@ def _process_incomplete_year(config_stf: ShortTermForecastConfig,
     df_existant = pd.concat([df_regional.copy(), df_srm_copy], ignore_index=True)
     
     # Process current year result
-    df_result_current = prepare_prediction_output_stf(target_region, result_current_year['results'])
+    try:
+        df_result_current, region_mode = prepare_prediction_output_stf(target_region, result_current_year['results'], return_used_mode = True)
+    except ValueError as e:
+        print("Error in preparing STF output:", e)
+        df_result_current= prepare_prediction_output_stf(target_region, result_current_year['results'])
+
     df_result_current = correct_prediction_with_existant(df_result_current, df_existant, target_variable)
-    
+
     # Update data with current year forecast for next year's forecast
     df_srm_updated, df_regional_updated = append_forecast(
         df_result_current, df_srm, df_regional, target_variable
@@ -419,6 +438,8 @@ def _process_incomplete_year(config_stf: ShortTermForecastConfig,
     df_result_next = prepare_prediction_output_stf(target_region, result_next_year['results'])
     
     # Combine results: months after latest_month from current year + all of next year
+    df_result_current = df_result_current[df_result_current[Aliases.ACTIVITE] == "Total"]
+    df_result_next = df_result_next[df_result_next[Aliases.ACTIVITE] == "Total"]
     df_current_remaining = df_result_current[df_result_current[Aliases.MOIS] > latest_month]
     df_stf_combined = pd.concat([df_current_remaining, df_result_next], axis=0, ignore_index=True)
     
@@ -502,8 +523,8 @@ def run_full_forecast_srm(regions_override: dict | None = None) -> tuple[pd.Data
         
         df_features = extrapolate_features(df_features, latest_year + 1)
 
-        # Compute combined SRM data (Regional + Distributors)
-        df_srm = compute_df_srm(df_regional, df_dist, var_cols, VARIABLE)
+        # Compute combined SRM data (Regional + Distributors) and update df_regional with distributors
+        df_regional, df_srm = compute_df_srm(df_regional, df_dist, var_cols, VARIABLE)
         # Process based on whether the year is complete or not
         if latest_month == 12:
             df_stf, df_ltf = _process_complete_year(

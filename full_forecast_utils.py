@@ -68,7 +68,7 @@ def configure_stf_for_year(config_stf: ShortTermForecastConfig, year: int) -> No
         config_stf: STF config to modify (in-place)
         year: The year to set for evaluation
     """
-    config_stf.evaluation.eval_years_start = year
+    config_stf.evaluation.eval_years_start = year - 3
     config_stf.evaluation.eval_years_end = year
 
 

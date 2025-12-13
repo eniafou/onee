@@ -13,20 +13,138 @@ from onee.config.stf_config import ShortTermForecastConfig
 from onee.data.loader import DataLoader
 from onee.data.names import Aliases
 
-def prepare_prediction_output(region, results_list):
+def _compute_method_comparison_error(results_list):
+    """
+    Compare the prediction errors of direct Total vs sum of activities.
+    
+    Uses the last 3 years (excluding the most recent) from test_years to compute
+    mean absolute percentage error (MAPE) for both methods.
+    
+    Args:
+        results_list: List of result dictionaries
+        
+    Returns:
+        tuple: (use_sum_activities: bool, activities_results: list, total_result: dict or None)
+        - use_sum_activities: True if summing activities is better than direct Total
+        - activities_results: list of results for non-Total activities
+        - total_result: result dict for Total, or None if not found
+    """
+    # Separate Total and activities
+    total_result = None
+    activities_results = []
+    
+    for result in results_list:
+        entity = result.get("entity", "")
+        if entity.startswith("SRM_") or not entity:
+            total_result = result
+        else:
+            activities_results.append(result)
+    
+    # If no activities or no Total, can't compare
+    if not activities_results or total_result is None:
+        return False, activities_results, total_result
+    
+    # Get test_years from Total result
+    total_test_years = total_result.get("test_years", {})
+    if not total_test_years:
+        return False, activities_results, total_result
+    
+    # Find available years in test_years (look for keys like "2021_actual_annual")
+    available_years = set()
+    for key in total_test_years.keys():
+        if key.endswith("_actual_annual"):
+            try:
+                year = int(key.split("_")[0])
+                available_years.add(year)
+            except ValueError:
+                continue
+    
+    if len(available_years) < 4:
+        # Need at least 4 years (3 for comparison + 1 latest to exclude)
+        return False, activities_results, total_result
+    
+    # Sort years and exclude the latest one, take last 3
+    sorted_years = sorted(available_years)
+    comparison_years = sorted_years[-4:-1]  # Last 3 years excluding the most recent
+    
+    # Compute errors for direct Total prediction
+    total_errors = []
+    for year in comparison_years:
+        actual_key = f"{year}_actual_annual"
+        pred_key = f"{year}_predicted_annual"
+        if actual_key in total_test_years and pred_key in total_test_years:
+            actual = total_test_years[actual_key]
+            pred = total_test_years[pred_key]
+            if actual != 0:
+                error_pct = abs((pred - actual) / actual) * 100
+                total_errors.append(error_pct)
+    
+    if not total_errors:
+        return False, activities_results, total_result
+    
+    # Compute errors for sum of activities
+    sum_errors = []
+    for year in comparison_years:
+        sum_actual = 0
+        sum_pred = 0
+        all_activities_have_data = True
+        
+        for act_result in activities_results:
+            act_test_years = act_result.get("test_years", {})
+            actual_key = f"{year}_actual_annual"
+            pred_key = f"{year}_predicted_annual"
+            
+            if actual_key in act_test_years and pred_key in act_test_years:
+                sum_actual += act_test_years[actual_key]
+                sum_pred += act_test_years[pred_key]
+            else:
+                all_activities_have_data = False
+                break
+        
+        if all_activities_have_data and sum_actual != 0:
+            error_pct = abs((sum_pred - sum_actual) / sum_actual) * 100
+            sum_errors.append(error_pct)
+    
+    if not sum_errors or len(sum_errors) != len(total_errors):
+        return False, activities_results, total_result
+    
+    # Compare mean errors
+    mean_total_error = np.mean(total_errors)
+    mean_sum_error = np.mean(sum_errors)
+    
+    print(f"  📊 Method comparison (last 3 years, excluding most recent):")
+    print(f"     Direct Total MAPE: {mean_total_error:.2f}%")
+    print(f"     Sum of Activities MAPE: {mean_sum_error:.2f}%")
+    
+    use_sum = mean_sum_error < mean_total_error
+    if use_sum:
+        print(f"     ✅ Using sum of activities (better by {mean_total_error - mean_sum_error:.2f}%)")
+    else:
+        print(f"     ✅ Using direct Total prediction (better by {mean_sum_error - mean_total_error:.2f}%)")
+    
+    return use_sum, activities_results, total_result
+
+
+def prepare_prediction_output(region, results_list, return_used_mode=False):
     """
     Create a tall DataFrame with monthly predictions for a single region.
     
     Args:
         region: Region name
         results_list: List of result dictionaries for this region
+        return_used_mode: If True, also return whether sum of activities was used
         
     Returns:
-        pandas DataFrame with columns: Region, Activity, Year, Month, Consommation
+        If return_used_mode is False:
+            pandas DataFrame with columns: Region, Activity, Year, Month, Consommation
+        If return_used_mode is True:
+            tuple: (DataFrame, use_sum_activities: bool)
         
     Notes:
         - For level 0 (SRM), adds an artificial activity called "Total"
         - Extracts monthly predictions from the best_model of each result
+        - If activities exist, compares direct Total vs sum of activities using
+          the last 3 years (excluding most recent) and uses the better method
     """
 
     def extract_activity(entity_name: str) -> str:
@@ -39,6 +157,9 @@ def prepare_prediction_output(region, results_list):
     
     if not results_list:
         return pd.DataFrame(columns=[Aliases.REGION, Aliases.ACTIVITE, Aliases.ANNEE, Aliases.MOIS, Aliases.CONSOMMATION_KWH])
+    
+    # Compare methods to decide whether to use sum of activities or direct Total
+    use_sum_activities, activities_results, total_result = _compute_method_comparison_error(results_list)
         
     for result in results_list:
         entity = result.get("entity", "")
@@ -55,24 +176,47 @@ def prepare_prediction_output(region, results_list):
         else:
             activity = extract_activity(entity)
         
-        # Extract monthly predictions for each year
-        for year, df_monthly in monthly_details.items():
-            if df_monthly is None or df_monthly.empty:
-                continue
+        # Get only the latest year from monthly_details
+        latest_year = max(monthly_details.keys())
+        df_monthly = monthly_details[latest_year]
+        
+        if df_monthly is None or df_monthly.empty:
+            continue
+        
+        # Build historical consumption lookup for safety net (from previous years in monthly_details)
+        historical_consumption = {}
+        for hist_year, hist_df in monthly_details.items():
+            if hist_df is not None and not hist_df.empty:
+                for _, hist_row in hist_df.iterrows():
+                    hist_month = hist_row.get("Month")
+                    # Use "Actual" column for historical data if available, otherwise use "Predicted"
+                    hist_value = hist_row.get("Actual") if "Actual" in hist_df.columns else hist_row.get("Predicted")
+                    if hist_month is not None and hist_value is not None:
+                        historical_consumption[(hist_year, int(hist_month))] = hist_value
+        
+        # Iterate through each month in the latest year
+        for _, row in df_monthly.iterrows():
+            month = row.get("Month")
+            predicted = row.get("Predicted")
             
-            # Iterate through each month in the year
-            for _, row in df_monthly.iterrows():
-                month = row.get("Month")
-                predicted = row.get("Predicted")
+            if month is not None and predicted is not None:
+                # Safety net: if predicted consumption is negative, use last year's value
+                if predicted < 0:
+                    last_year_key = (latest_year - 1, int(month))
+                    fallback_value = historical_consumption.get(last_year_key)
+                    if fallback_value is not None and fallback_value >= 0:
+                        predicted = fallback_value
+                    else:
+                        # If no valid last year data, use 0 as last resort
+                        predicted = 0
                 
-                if month is not None and predicted is not None:
-                    records.append({
-                        Aliases.REGION: region,
-                        Aliases.ACTIVITE: activity,
-                        Aliases.ANNEE: year,
-                        Aliases.MOIS: int(month),
-                        Aliases.CONSOMMATION_KWH: predicted
-                    })
+                records.append({
+                    Aliases.REGION: region,
+                    Aliases.ACTIVITE: activity,
+                    Aliases.ANNEE: latest_year,
+                    Aliases.MOIS: int(month),
+                    Aliases.CONSOMMATION_KWH: predicted
+                })
     
     if not records:
         # Return empty DataFrame with correct columns if no data
@@ -80,9 +224,29 @@ def prepare_prediction_output(region, results_list):
     
     df = pd.DataFrame(records)
     
+    # If sum of activities is better, replace Total values with sum of activities
+    if use_sum_activities and activities_results:
+        # Get all non-Total activities
+        df_activities = df[df[Aliases.ACTIVITE] != "Total"]
+        
+        if not df_activities.empty:
+            # Compute sum by Year and Month
+            df_sum = (
+                df_activities.groupby([Aliases.REGION, Aliases.ANNEE, Aliases.MOIS])
+                .agg({Aliases.CONSOMMATION_KWH: 'sum'})
+                .reset_index()
+            )
+            df_sum[Aliases.ACTIVITE] = "Total"
+            
+            # Remove old Total rows and add new computed ones
+            df = df[df[Aliases.ACTIVITE] != "Total"]
+            df = pd.concat([df, df_sum], ignore_index=True)
+    
     # Sort for better readability
     df = df.sort_values([Aliases.REGION, Aliases.ACTIVITE, Aliases.ANNEE, Aliases.MOIS]).reset_index(drop=True)
     
+    if return_used_mode:
+        return df, 1 if use_sum_activities else 0
     return df
 
 

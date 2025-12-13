@@ -40,13 +40,37 @@ def prepare_prediction_output(region, results_list):
     if not results_list:
         return pd.DataFrame(columns=[Aliases.REGION, Aliases.ANNEE, Aliases.CONSOMMATION_KWH])
     
+    # Build historical consumption lookup for safety net (from actuals in results)
+    # Used to replace negative predictions with last year's actual value
+    historical_consumption = {}
+    for r in results_list:
+        actuals = r.get("actuals", [])
+        forecast_years = r.get("forecast_years", [])
+        region_name = r.get("region", region)
+        for y, actual in zip(forecast_years, actuals):
+            if actual is not None:
+                historical_consumption[(region_name, y)] = actual
+    
     for r in results_list:
         for y, v in zip(r["forecast_years"], r["pred_annual"]):
+            region_name = r.get("region", region)
+            predicted = v
+            
+            # Safety net: if predicted consumption is negative, use last year's value
+            if predicted < 0:
+                last_year_key = (region_name, y - 1)
+                fallback_value = historical_consumption.get(last_year_key)
+                if fallback_value is not None and fallback_value >= 0:
+                    predicted = fallback_value
+                else:
+                    # If no valid last year data, use 0 as last resort
+                    predicted = 0
+            
             df_summary_records.append(
                 {
-                    Aliases.REGION: r.get("region", region),
+                    Aliases.REGION: region_name,
                     Aliases.ANNEE: y,
-                    Aliases.CONSOMMATION_KWH: v
+                    Aliases.CONSOMMATION_KWH: predicted
                 }
             )
     
@@ -100,8 +124,6 @@ def run_ltf_srm_forecast(config, target_region, df_regional, df_features, df_srm
             target_region
         )
         all_results = []
-
-        activities = sorted(df_regional[Aliases.ACTIVITE].unique())
 
         for train_start, train_end in forecast_runs:
             print(
