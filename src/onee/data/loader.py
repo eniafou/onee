@@ -89,6 +89,17 @@ class DataLoader:
             WHERE {GRDColumns.GRD} = '{GRDValues.GRD_SRM}' AND {GRDColumns.CLASS} = '{GRDValues.CLASS_BT}' AND {GRDColumns.REGION} = '{target_region}'
             ORDER BY {GRDColumns.YEAR}, {GRDColumns.MONTH}, {GRDColumns.ACTIVITY}
         """
+
+        query_regional_total = f"""
+            SELECT
+                {GRDColumns.YEAR} as {Aliases.ANNEE},
+                {GRDColumns.MONTH} as {Aliases.MOIS},
+                {GRDColumns.ACTIVITY} as {Aliases.ACTIVITE},
+                {spec['regional_select_expr']}
+            FROM {Tables.GRD}
+            WHERE {GRDColumns.GRD} = '{GRDValues.GRD_SRM}' AND {GRDColumns.CLASS} = '{GRDValues.CLASS_TOTAL}' AND {GRDColumns.REGION} = '{target_region}'
+            ORDER BY {GRDColumns.YEAR}, {GRDColumns.MONTH}, {GRDColumns.ACTIVITY}
+        """
         
         query_dist = None
         if spec["distributor_supported"]:
@@ -121,7 +132,7 @@ class DataLoader:
             "distributor": spec["distributor_var_col"],
         }
         
-        return query_regional_mt, query_regional_bt, query_dist, query_features, var_cols
+        return query_regional_mt, query_regional_bt, query_regional_total, query_dist, query_features, var_cols
     
     def load_srm_data(
         self,
@@ -142,7 +153,7 @@ class DataLoader:
             Tuple of (df_regional, df_features, df_dist, var_cols)
         """
         # Generate queries
-        q_regional_mt, q_regional_bt, q_dist, q_features, var_cols = self.get_queries_for(variable, target_region)
+        q_regional_mt, q_regional_bt, q_regional_total, q_dist, q_features, var_cols = self.get_queries_for(variable, target_region)
         
         # Connect to databases
         db = self._connect_db(db_path)
@@ -150,6 +161,7 @@ class DataLoader:
         # Load regional data
         df_regional_mt = pd.read_sql_query(q_regional_mt, db)
         df_regional_bt = pd.read_sql_query(q_regional_bt, db)
+        df_regional_total = pd.read_sql_query(q_regional_total, db)
         df_features = pd.read_sql_query(q_features, db)
         
         # Load distributor data if supported
@@ -162,7 +174,8 @@ class DataLoader:
         df_regional_mt[Aliases.ACTIVITE] = df_regional_mt[Aliases.ACTIVITE].replace(
             GRDValues.ACTIVITY_ADMINISTRATIF, GRDValues.ACTIVITY_ADMINISTRATIF_MT
         )
-        df_regional = pd.concat([df_regional_bt, df_regional_mt])
+        df_regional_total[Aliases.ACTIVITE].fillna(GRDValues.CLASS_TOTAL, inplace=True)
+        df_regional = pd.concat([df_regional_bt, df_regional_mt, df_regional_total])
         
         # Validate and clean
         reg_var_col = var_cols["regional"]

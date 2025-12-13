@@ -230,6 +230,7 @@ class GRDValues:
     GRD_SRM = "SRM"
     CLASS_MT = "MT"
     CLASS_BT = "BT"
+    CLASS_TOTAL = "Total"
     ACTIVITY_ADMINISTRATIF = "Administratif"
     ACTIVITY_ADMINISTRATIF_MT = "Administratif_mt"
     ACTIVITY_AGRICOLE = "Agricole"

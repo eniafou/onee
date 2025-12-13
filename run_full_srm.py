@@ -23,6 +23,9 @@ def compute_df_srm(df_regional: pd.DataFrame, df_dist: pd.DataFrame | None,
     """
     Compute df_srm (Regional + Distributors combined) and update df_regional with distributors.
     
+    First attempts to extract df_srm from an existing "Total" activity (which represents the full SRM).
+    If "Total" doesn't exist, falls back to aggregating all activities + distributors to compute it.
+    
     Args:
         df_regional: Regional DataFrame
         df_dist: Distributors DataFrame (can be None)
@@ -37,41 +40,69 @@ def compute_df_srm(df_regional: pd.DataFrame, df_dist: pd.DataFrame | None,
     reg_var_col = var_cols["regional"]
     df_regional_updated = df_regional.copy()
     
-    df_total_regional = (
-        df_regional.groupby([Aliases.ANNEE, Aliases.MOIS])
-        .agg({reg_var_col: 'sum'})
-        .reset_index()
-        .rename(columns={reg_var_col: target_variable})
-    )
+    # Try to get df_srm from existing "Total" activity first (Total = full SRM)
+    df_total_activity = df_regional[df_regional[Aliases.ACTIVITE] == "Total"]
     
-    if df_dist is not None and len(df_dist) > 0:
-        dist_var_col = var_cols["distributor"]
-        df_all_dist = (
-            df_dist.groupby([Aliases.ANNEE, Aliases.MOIS])
-            .agg({dist_var_col: 'sum'})
-            .reset_index()
-            .rename(columns={dist_var_col: target_variable})
-        )
-        
-        # Add distributors as a new activity in df_regional
-        df_dist_as_activity = df_all_dist.copy()
-        df_dist_as_activity[Aliases.ACTIVITE] = "All distributers"
-        df_dist_as_activity = df_dist_as_activity.rename(columns={target_variable: reg_var_col})
-        df_regional_updated = pd.concat([df_regional_updated, df_dist_as_activity], ignore_index=True)
-        
-        # Compute combined SRM
+    if not df_total_activity.empty:
+        # "Total" activity exists, use it directly as df_srm
         df_srm = (
-            pd.concat(
-                [df_total_regional[[Aliases.ANNEE, Aliases.MOIS, target_variable]],
-                 df_all_dist[[Aliases.ANNEE, Aliases.MOIS, target_variable]]],
-                ignore_index=True
-            )
-            .groupby([Aliases.ANNEE, Aliases.MOIS])
-            .agg({target_variable: 'sum'})
-            .reset_index()
+            df_total_activity[[Aliases.ANNEE, Aliases.MOIS, reg_var_col]]
+            .copy()
+            .rename(columns={reg_var_col: target_variable})
         )
+        
+        # Still need to add distributors to df_regional_updated if available
+        if df_dist is not None and len(df_dist) > 0:
+            dist_var_col = var_cols["distributor"]
+            df_all_dist = (
+                df_dist.groupby([Aliases.ANNEE, Aliases.MOIS])
+                .agg({dist_var_col: 'sum'})
+                .reset_index()
+                .rename(columns={dist_var_col: target_variable})
+            )
+            df_dist_as_activity = df_all_dist.copy()
+            df_dist_as_activity[Aliases.ACTIVITE] = "All distributers"
+            df_dist_as_activity = df_dist_as_activity.rename(columns={target_variable: reg_var_col})
+            df_regional_updated = pd.concat([df_regional_updated, df_dist_as_activity], ignore_index=True)
     else:
-        df_srm = df_total_regional[[Aliases.ANNEE, Aliases.MOIS, target_variable]].copy()
+        # "Total" doesn't exist, aggregate all activities (excluding "Total")
+        df_non_total = df_regional[df_regional[Aliases.ACTIVITE] != "Total"]
+        df_total_regional = (
+            df_non_total.groupby([Aliases.ANNEE, Aliases.MOIS])
+            .agg({reg_var_col: 'sum'})
+            .reset_index()
+            .rename(columns={reg_var_col: target_variable})
+        )
+        
+        # Process distributors if available
+        if df_dist is not None and len(df_dist) > 0:
+            dist_var_col = var_cols["distributor"]
+            df_all_dist = (
+                df_dist.groupby([Aliases.ANNEE, Aliases.MOIS])
+                .agg({dist_var_col: 'sum'})
+                .reset_index()
+                .rename(columns={dist_var_col: target_variable})
+            )
+            
+            # Add distributors as a new activity in df_regional_updated
+            df_dist_as_activity = df_all_dist.copy()
+            df_dist_as_activity[Aliases.ACTIVITE] = "All distributers"
+            df_dist_as_activity = df_dist_as_activity.rename(columns={target_variable: reg_var_col})
+            df_regional_updated = pd.concat([df_regional_updated, df_dist_as_activity], ignore_index=True)
+            
+            # Compute combined SRM (Regional total + Distributors)
+            df_srm = (
+                pd.concat(
+                    [df_total_regional[[Aliases.ANNEE, Aliases.MOIS, target_variable]],
+                     df_all_dist[[Aliases.ANNEE, Aliases.MOIS, target_variable]]],
+                    ignore_index=True
+                )
+                .groupby([Aliases.ANNEE, Aliases.MOIS])
+                .agg({target_variable: 'sum'})
+                .reset_index()
+            )
+        else:
+            df_srm = df_total_regional[[Aliases.ANNEE, Aliases.MOIS, target_variable]].copy()
     
     return df_regional_updated, df_srm
 
