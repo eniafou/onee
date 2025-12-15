@@ -44,14 +44,14 @@ def compute_df_srm(df_regional: pd.DataFrame, df_dist: pd.DataFrame | None,
     df_total_activity = df_regional[df_regional[Aliases.ACTIVITE] == "Total"]
     
     if not df_total_activity.empty:
-        # "Total" activity exists, use it directly as df_srm
-        df_srm = (
+        # "Total" activity exists, represents total regional consumption
+        df_total_regional = (
             df_total_activity[[Aliases.ANNEE, Aliases.MOIS, reg_var_col]]
             .copy()
             .rename(columns={reg_var_col: target_variable})
         )
         
-        # Still need to add distributors to df_regional_updated if available
+        # Combine with distributors to get df_srm
         if df_dist is not None and len(df_dist) > 0:
             dist_var_col = var_cols["distributor"]
             df_all_dist = (
@@ -60,10 +60,26 @@ def compute_df_srm(df_regional: pd.DataFrame, df_dist: pd.DataFrame | None,
                 .reset_index()
                 .rename(columns={dist_var_col: target_variable})
             )
+            
+            # Add distributors as a new activity in df_regional_updated
             df_dist_as_activity = df_all_dist.copy()
             df_dist_as_activity[Aliases.ACTIVITE] = "All distributers"
             df_dist_as_activity = df_dist_as_activity.rename(columns={target_variable: reg_var_col})
             df_regional_updated = pd.concat([df_regional_updated, df_dist_as_activity], ignore_index=True)
+            
+            # Compute combined SRM (Regional total + Distributors)
+            df_srm = (
+                pd.concat(
+                    [df_total_regional[[Aliases.ANNEE, Aliases.MOIS, target_variable]],
+                     df_all_dist[[Aliases.ANNEE, Aliases.MOIS, target_variable]]],
+                    ignore_index=True
+                )
+                .groupby([Aliases.ANNEE, Aliases.MOIS])
+                .agg({target_variable: 'sum'})
+                .reset_index()
+            )
+        else:
+            df_srm = df_total_regional[[Aliases.ANNEE, Aliases.MOIS, target_variable]].copy()
     else:
         # "Total" doesn't exist, aggregate all activities (excluding "Total")
         df_non_total = df_regional[df_regional[Aliases.ACTIVITE] != "Total"]

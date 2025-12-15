@@ -82,27 +82,26 @@ def _compute_method_comparison_error(results_list):
     if not total_errors:
         return False, activities_results, total_result
     
-    # Compute errors for sum of activities
+    # Compute errors for sum of activities (compare sum of activities prediction to actual Total)
     sum_errors = []
     for year in comparison_years:
-        sum_actual = 0
         sum_pred = 0
         all_activities_have_data = True
-        
+
         for act_result in activities_results:
             act_test_years = act_result.get("test_years", {})
-            actual_key = f"{year}_actual_annual"
             pred_key = f"{year}_predicted_annual"
-            
-            if actual_key in act_test_years and pred_key in act_test_years:
-                sum_actual += act_test_years[actual_key]
+            if pred_key in act_test_years:
                 sum_pred += act_test_years[pred_key]
             else:
                 all_activities_have_data = False
                 break
-        
-        if all_activities_have_data and sum_actual != 0:
-            error_pct = abs((sum_pred - sum_actual) / sum_actual) * 100
+
+        # Compare to actual Total, not sum of actuals
+        actual_key = f"{year}_actual_annual"
+        if all_activities_have_data and actual_key in total_test_years and total_test_years[actual_key] != 0:
+            total_actual = total_test_years[actual_key]
+            error_pct = abs((sum_pred - total_actual) / total_actual) * 100
             sum_errors.append(error_pct)
     
     if not sum_errors or len(sum_errors) != len(total_errors):
