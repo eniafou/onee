@@ -8,7 +8,7 @@
 5. [Strategy 3: Hybrid Approach](#strategy-3-hybrid-approach)
 6. [Strategy 4: Advanced Growth Rate Model](#strategy-4-advanced-growth-rate-model)
 7. [Strategy 5: Ensemble Integration](#strategy-5-ensemble-integration)
-8. [Feature Configuration](#feature-engineering-for-stf)
+8. [Feature Configuration](#feature-configuration)
 9.  [Model Hyperparameters](#model-hyperparameters)
 10. [Loss Configuration](#loss-configuration)
 11. [Evaluation Methodology](#evaluation-methodology)
