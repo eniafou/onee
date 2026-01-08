@@ -512,7 +512,7 @@ class AugmentedConsensusPrior(PowerGrowthPrior):
     memory_decay : float
         Decay factor for weighting historical observations (0 < decay <= 1).
         Values < 1.0 give more weight to recent observations.
-        Value of 1.0 gives equal weight to all observations (uses TheilSen regression).
+        Value of 1.0 gives equal weight to all observations
     """
     def __init__(
         self, 
@@ -556,7 +556,6 @@ class AugmentedConsensusPrior(PowerGrowthPrior):
             lr_time = LinearRegression()
             lr_time.fit(X_power, y_transformed, sample_weight=weights)
         else:
-            # Use Robust Regression (TheilSen) for equal weights
             lr_time = LinearRegression(random_state=42)
             lr_time.fit(X_power, y_transformed)
 
@@ -657,34 +656,31 @@ class AugmentedConsensusPrior(PowerGrowthPrior):
             elif x < 0:
                 return -1
             
-        if s_pull == 0.0:
-            if s_hist < 0.0:
-                return s_hist * 0.8
-            else:
-                if self.r2_score < 0.3:
-                    return -1 * s_hist * 0.2
+        if self.use_dynamic_weights:
+            if s_pull == 0.0:
+                if s_hist < 0.0:
+                    return s_hist * 0.8
                 else:
+                    if self.r2_score < 0.3:
+                        return -1 * s_hist * 0.2
+                    else:
+                        if self.last_value > 10**8:
+                            return -1 * s_hist
+
+            if self.r2_score > 0:
+                if s_hist > 0.0 and s_pull > 0.0:
                     if self.last_value > 10**8:
                         return -1 * s_hist
-
-        if self.r2_score > 0:
-            if s_hist > 0.0 and s_pull > 0.0:
-                if self.last_value > 10**8:
-                    return -1 * s_hist
-                return  s_hist * 2
-            if s_hist < 0.0 and s_pull < 0.0:
-                return s_hist * 10
-    
-
-
-        if self.use_dynamic_weights:
+                    return  s_hist * 2
+                if s_hist < 0.0 and s_pull < 0.0:
+                    return s_hist * 10
+            
             # Here, we treat R2 as the "Trust in History".
             trust_in_history = np.clip(self.r2_score, 0.01, 0.9) 
             s_hist = get_sign(s_pull) * abs(s_hist)
         
             return s_hist * trust_in_history
         
-        # Fallback to static weight
         return (s_hist * (1 - self.driver_weight)) + (s_pull * self.driver_weight)
 
     def get_params(self) -> Dict:

@@ -2,7 +2,7 @@
 # run_horizon_forecast_cd.py (Clean + Correct)
 # ─────────────────────────────────────────────────────────────
 
-from short_term_forecast_strategies import (
+from onee.short_term_forecast_strategies import (
     create_monthly_matrix,
 )
 from long_term_forecast_strategies import run_long_horizon_forecast
@@ -26,19 +26,20 @@ warnings.filterwarnings("ignore")
 # ─────────────────────────────────────────────────────────────
 def prepare_prediction_output(all_results):
     """
-    Create a simple summary DataFrame with Region, Year, and Predicted_Annual
+    Create a simple summary DataFrame with Region, Activity, Year, and Predicted_Annual
     
     Args:
         all_results: List of forecast result dictionaries
         
     Returns:
-        pandas DataFrame with Region, Year, and Predicted_Annual columns
+        pandas DataFrame with Region, Activity, Year, and Predicted_Annual columns
     """
     df_summary_records = []
     for r in all_results:
         for y, v in zip(r["forecast_years"], r["pred_annual"]):
             df_summary_records.append(
                 {
+                    Aliases.REGION: r.get("region"),
                     Aliases.ACTIVITE: r.get("activity"),
                     Aliases.ANNEE: y,
                     Aliases.CONSOMMATION_KWH: v
@@ -48,21 +49,30 @@ def prepare_prediction_output(all_results):
     return pd.DataFrame(df_summary_records)
 
 
-def prepare_ca_output(df_prediction, df_contrats):
+def prepare_ca_output(df_prediction, df_contrats, group_by="region"):
     """
-    For each unique (Activity, Year) in df_prediction, find all contracts still operating 
+    For each unique (Entity, Year) in df_prediction, find all contracts still operating 
     (move_out_year >= year) and distribute Consommation_Total based on Puissance_Facturee.
     Then apply consumption breakdown percentages.
     
     Args:
-        df_prediction: DataFrame with Activity, Year, and Consommation_Total columns
+        df_prediction: DataFrame with Activity/Region, Year, and Consommation_Total columns
         df_contrats: DataFrame with contract data including DATE_DEMENAGEMENT
+        group_by: "activity" or "region" - determines which entity to use for grouping
         
     Returns:
         DataFrame with columns: Region, Partenaire, Contrat, Activity, Year,
                                Consommation_Total, Consommation_ZCONHC, Consommation_ZCONHL, 
                                Consommation_ZCONHP, Puissance_Facturee, Niveau_tension
     """
+    # Determine which column to use based on group_by parameter
+    if group_by == "activity":
+        entity_col = Aliases.ACTIVITE
+    elif group_by == "region":
+        entity_col = Aliases.REGION
+    else:
+        raise ValueError(f"group_by must be 'activity' or 'region', got '{group_by}'")
+    
     # Get unique contracts and compute move_out_year for each
     contracts = df_contrats[Aliases.CONTRAT].unique()
     
@@ -84,15 +94,15 @@ def prepare_ca_output(df_prediction, df_contrats):
     )
     contract_lookup = contract_info.set_index(Aliases.CONTRAT).to_dict('index')
     
-    # Build historical yearly consumption lookup by (activity, year) for safety net
+    # Build historical yearly consumption lookup by (entity, year) for safety net
     # Used to replace negative predictions with last year's actual value
     historical_yearly_consumption = (
         df_contrats
-        .groupby([Aliases.ACTIVITE, Aliases.ANNEE], as_index=False)
+        .groupby([entity_col, Aliases.ANNEE], as_index=False)
         .agg({Aliases.CONSOMMATION_KWH: 'sum'})
     )
     historical_consumption_lookup = {
-        (row[Aliases.ACTIVITE], row[Aliases.ANNEE]): row[Aliases.CONSOMMATION_KWH]
+        (row[entity_col], row[Aliases.ANNEE]): row[Aliases.CONSOMMATION_KWH]
         for _, row in historical_yearly_consumption.iterrows()
     }
     
@@ -117,15 +127,19 @@ def prepare_ca_output(df_prediction, df_contrats):
     
     records = []
     
-    # Process each (Activity, Year) from predictions
+    # Process each (Entity, Year) from predictions
     for _, pred_row in df_prediction.iterrows():
-        activity = pred_row[Aliases.ACTIVITE]
+        entity_value = pred_row[entity_col]
         year = pred_row[Aliases.ANNEE]
         total_consumption = pred_row[Aliases.CONSOMMATION_KWH]
         
+        # Skip if entity_value is None (e.g., activity-level prediction when processing region)
+        if pd.isna(entity_value):
+            continue
+        
         # Safety net: if predicted consumption is negative, use last year's value
         if total_consumption < 0:
-            last_year_key = (activity, year - 1)
+            last_year_key = (entity_value, year - 1)
             fallback_value = historical_consumption_lookup.get(last_year_key)
             if fallback_value is not None and fallback_value >= 0:
                 total_consumption = fallback_value
@@ -133,12 +147,12 @@ def prepare_ca_output(df_prediction, df_contrats):
                 # If no valid last year data, use 0 as last resort
                 total_consumption = 0
         
-        # Find all contracts for this activity that are still operating (move_out_year >= year)
+        # Find all contracts for this entity that are still operating (move_out_year >= year)
         active_contracts = []
         for contrat, move_out in contract_move_out.items():
             info = contract_lookup.get(contrat, {})
-            contrat_activity = info.get(Aliases.ACTIVITE, None)
-            if contrat_activity == activity and (move_out is None or move_out >= year):
+            contrat_entity = info.get(entity_col, None)
+            if contrat_entity == entity_value and (move_out is None or move_out >= year):
                 active_contracts.append(contrat)
         
         # First pass: collect Puissance_Facturee and other data for all active contracts
@@ -192,7 +206,7 @@ def prepare_ca_output(df_prediction, df_contrats):
                 "pct_hp": pct_hp,
             })
         
-        # Calculate total Puissance_Facturee for this activity-year
+        # Calculate total Puissance_Facturee for this entity-year
         total_pf = sum(c["pf_value"] for c in contract_data_list)
         
         # Second pass: distribute consumption and apply percentages
@@ -348,6 +362,79 @@ def run_ltf_cd_forecast(config, df_contrats, df_features, output_dir=None):
                         }
                     )
 
+            if 2 in RUN_LEVELS:
+                print(f"\n{'#'*60}")
+                print(f"LEVEL 2: REGION")
+                print(f"{'#'*60}")
+
+                regions = sorted(df_contrats[Aliases.REGION].dropna().unique())
+
+                for region in regions:
+                    df_region = df_contrats[df_contrats[Aliases.REGION] == region].copy()
+                    df_region_agg = df_region.groupby([Aliases.ANNEE, Aliases.MOIS]).agg({
+                        config.data.target_variable: 'sum',
+                        Aliases.PUISSANCE_FACTUREE: 'sum'
+                    }).reset_index()
+                    
+                    df_train = df_region_agg[
+                        (df_region_agg[Aliases.ANNEE] >= train_start) & (df_region_agg[Aliases.ANNEE] <= train_end)
+                    ]
+                    monthly_matrix = create_monthly_matrix(
+                        df_train, value_col=config.data.target_variable
+                    )
+                    years = np.sort(df_train[Aliases.ANNEE].unique())
+                    
+                    # Compute region-level features by aggregating contract features
+                    df_region_features = data_loader.compute_contract_features(
+                        df_region, entity_col=Aliases.REGION, end_year=train_end + config.temporal.horizon
+                    )
+                    df_r = df_region_features[df_region_features[Aliases.REGION] == region]
+                    df_r = df_r.merge(df_features, on=Aliases.ANNEE, how="outer")
+
+                    res = run_long_horizon_forecast(
+                        monthly_matrix=monthly_matrix,
+                        years=years,
+                        df_features=df_r,
+                        df_monthly=df_region_agg,
+                        config=config,
+                        MODEL_REGISTRY=MODEL_REGISTRY,
+                        region_entity=f"CD - région {region}",
+                        save_folder=output_dir / f"region_{region}" if output_dir else None,
+                    )
+                    
+                    forecast_years = [y for y, _ in res["horizon_predictions"]]
+                    pred_annual = [float(v) for _, v in res["horizon_predictions"]]
+                    actuals = []
+                    percent_errors = []
+                    for y, v in zip(forecast_years, pred_annual):
+                        actual = None
+                        percent_error = None
+                        mask = df_region_agg[Aliases.ANNEE] == y
+                        if not df_region_agg.loc[mask, config.data.target_variable].empty:
+                            actual = df_region_agg.loc[mask, config.data.target_variable].sum()
+                            percent_error = (
+                                (v - actual) / actual * 100 if actual != 0 else None
+                            )
+
+                        actuals.append(actual)
+                        percent_errors.append(percent_error)
+
+                    all_results.append(
+                        {
+                            "region": region,
+                            "activity": None,
+                            "train_start": train_start,
+                            "train_end": train_end,
+                            "level": f"Région_{region}",
+                            "forecast_years": forecast_years,
+                            "pred_annual": pred_annual,
+                            "pred_monthly": res["monthly_forecasts"],
+                            "run_parameters": res.get("run_parameters", {}),
+                            "actuals": actuals,
+                            "percent_errors": percent_errors,
+                        }
+                    )
+
         print(f"\n✅ LTF CD Forecast completed: {len(all_results)} results")
         
         return {
@@ -398,10 +485,28 @@ if __name__ == "__main__":
     )
     
     # Run the forecast with config, data, and output_dir
-    result = run_ltf_cd_forecast(config=config, df_contrats=df_contrats, df_features=df_features, output_dir=None)
+    result = run_ltf_cd_forecast(config=config, df_contrats=df_contrats, df_features=df_features, output_dir=config.get_output_dir())
     joblib.dump(result, 'result_ltf_cd.joblib')
     df_prediction = prepare_prediction_output(result['results'])
-    final_df = prepare_ca_output(df_prediction, df_contrats)
+    
+    # Process activity-level and region-level predictions separately
+    df_activity_predictions = df_prediction[df_prediction[Aliases.ACTIVITE].notna()]
+    df_region_predictions = df_prediction[df_prediction[Aliases.REGION].notna()]
+    
+    final_dfs = []
+    if not df_activity_predictions.empty:
+        final_df_activity = prepare_ca_output(df_activity_predictions, df_contrats, group_by="activity")
+        final_dfs.append(final_df_activity)
+    
+    if not df_region_predictions.empty:
+        final_df_region = prepare_ca_output(df_region_predictions, df_contrats, group_by="region")
+        final_dfs.append(final_df_region)
+    
+    if final_dfs:
+        final_df = pd.concat(final_dfs, ignore_index=True)
+    else:
+        final_df = pd.DataFrame()
+    
     final_df = rename_to_stf_cd_results(final_df)
     final_df.to_csv("ltf_cd_results.csv", index=False, encoding="utf-8-sig")
     # If successful, save outputs to disk

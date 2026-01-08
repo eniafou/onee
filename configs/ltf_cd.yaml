@@ -23,7 +23,8 @@ data:
   
   # Run levels for CD:
   # 1: Activities
-  run_levels: [1]
+  # 2: Regions
+  run_levels: [2]
   
   # Database paths (relative to project_root)
   db_path: data/all_data.db
@@ -81,22 +82,11 @@ models:
       
       # Prior Configuration for internal GP model - list of prior configs to try
       prior_config:
-        # - type: LinearGrowthPrior
-        #   min_annual_growth: 0.0
-        #   anchor_window: 3
-        # - type: PowerGrowthPrior
-        #   power: 2
-        #   anchor_window: 3
-        #   min_annual_growth: null
-        # - type: FlatPrior
-        #   method: last_value
-        #   anchor_window: 3
-        # - type: NeutralPrior
         - type: AugmentedConsensusPrior
           power: 0.5              # 1.0 = Linear, 0.5 = Square root
           anchor_window: 1
           min_annual_growth: null
           exog_col_idx: 0          # Index of driver column in X_exog
-          driver_weight: 0.5       # 0.0 = Pure History, 1.0 = Pure Driver
+          driver_weight: 0.0       # 0.0 = Pure History, 1.0 = Pure Driver
           memory_decay: 0.2
-          use_dynamic_weights: true
+          use_dynamic_weights: False
