@@ -8,13 +8,10 @@
 5. [Strategy 3: Hybrid Approach](#strategy-3-hybrid-approach)
 6. [Strategy 4: Advanced Growth Rate Model](#strategy-4-advanced-growth-rate-model)
 7. [Strategy 5: Ensemble Integration](#strategy-5-ensemble-integration)
-8. [Configuration Deep Dive](#configuration-deep-dive)
-9. [Feature Engineering for STF](#feature-engineering-for-stf)
-10. [Model Hyperparameters](#model-hyperparameters)
-11. [Loss Configuration](#loss-configuration)
-12. [Evaluation Methodology](#evaluation-methodology)
-13. [Practical Configuration Examples](#practical-configuration-examples)
-14. [Troubleshooting & Best Practices](#troubleshooting--best-practices)
+8. [Feature Engineering for STF](#feature-engineering-for-stf)
+9.  [Model Hyperparameters](#model-hyperparameters)
+10. [Loss Configuration](#loss-configuration)
+11. [Evaluation Methodology](#evaluation-methodology)
 
 ---
 
@@ -42,30 +39,30 @@ The STF system uses **four complementary strategies** that capture different asp
 ┌─────────────────────────────────────────────────────────────────┐
 │                    STRATEGY COMPARISON                           │
 ├─────────────────┬───────────────────────────────────────────────┤
-│ STRATEGY 1      │ PC-Based Growth Modeling                      │
-│                 │ • Captures dominant consumption patterns      │
-│                 │ • Uses Principal Components as features       │
-│                 │ • Best for: Stable patterns                   │
+│ STRATEGY 1      │ PC-Based Monthly Prediction                   │
+│                 │ • Predicts monthly values directly via PCA    │
+│                 │ • Ridge regression on PC scores               │
+│                 │ • Reconstructs curve from predicted PCs       │
 ├─────────────────┼───────────────────────────────────────────────┤
-│ STRATEGY 2      │ Direct Annual Growth                          │
-│                 │ • Models year-over-year changes directly      │
-│                 │ • Predicts annual growth rates                │
-│                 │ • Best for: Trending consumption              │
+│ STRATEGY 2      │ Annual Prediction + Distribution              │
+│                 │ • Predicts total annual consumption           │
+│                 │ • Ridge regression on annual values           │
+│                 │ • Distributes using weighted monthly pattern  │
 ├─────────────────┼───────────────────────────────────────────────┤
-│ STRATEGY 3      │ Hybrid Approach                               │
-│                 │ • Combines patterns + client behavior         │
-│                 │ • Weights historical vs. client influence     │
-│                 │ • Best for: Client-driven variability         │
+│ STRATEGY 3      │ Hybrid Pattern + Annual Prediction            │
+│                 │ • Predicts PC-based shape + historical pattern│
+│                 │ • Blends patterns with pc_weight              │
+│                 │ • Scales to separately predicted annual total │
 ├─────────────────┼───────────────────────────────────────────────┤
-│ STRATEGY 4      │ Advanced Growth Rate Model                    │
-│                 │ • Uses a logarithmic growth model           │
-│                 │ • Incorporates economic features              │
-│                 │ • Best for: Complex, non-linear trends        │
+│ STRATEGY 4      │ Mean-Reverting Growth Rate Model              │
+│                 │ • Predicts annual growth rate                 │
+│                 │ • Ridge regression on growth with transforms  │
+│                 │ • Distributes using weighted monthly pattern  │
 ├─────────────────┼───────────────────────────────────────────────┤
 │ STRATEGY 5      │ Ensemble (Meta-Strategy)                      │
 │                 │ • Combines predictions from all strategies    │
 │                 │ • Weighted by cross-validation performance    │
-│                 │ • Best for: Robust, uncertainty-aware forecasts│
+│                 │ • Applies bias correction via pinball loss    │
 └─────────────────┴───────────────────────────────────────────────┘
 ```
 
@@ -725,257 +722,6 @@ The `under_estimation_penalty` controls the asymmetric bias:
 - Higher value = penalize underestimation more
 - Used to compute tau for pinball loss
 - Ensemble applies learned bias correction factor
-
----
-
-
-## Configuration Deep Dive
-
-### Complete Configuration Example
-
-```yaml
-# ═══════════════════════════════════════════════════════════════
-# SHORT-TERM FORECASTING CONFIGURATION
-# ═══════════════════════════════════════════════════════════════
-
-data:
-  variable: consommation_kwh
-  db_path: data/all_data.db
-
-evaluation:
-  eval_years_start: 2021
-  eval_years_end: 2023
-
-# ───────────────────────────────────────────────────────────────
-# FEATURES
-# ───────────────────────────────────────────────────────────────
-features:
-  # Economic feature blocks (tried in all strategies)
-  feature_blocks:
-    none: []
-    gdp_only: [pib_mdh]
-    sectoral: [gdp_primaire, gdp_secondaire, gdp_tertiaire]
-    gdp_sectoral: [pib_mdh, gdp_primaire, gdp_secondaire, gdp_tertiaire]
-  
-  # Strategy 4: Growth rate feature transforms
-  growth_feature_transforms:
-    - [lag_lchg]
-    - [lchg, lag_lchg]
-  
-  # Strategy 4: Growth rate feature lags
-  growth_feature_lags:
-    - [1]
-    - [1, 2]
-  
-  # Strategy 1, 3: Monthly features
-  use_monthly_temp_options: [true, false]
-  use_monthly_clients_options: [true, false]
-  
-  # CD only: Puissance facturée
-  use_pf_options: [true, false]
-
-# ───────────────────────────────────────────────────────────────
-# MODEL HYPERPARAMETERS
-# ───────────────────────────────────────────────────────────────
-model:
-  # Strategy 1, 3: PCA configuration
-  n_pcs: 3
-  pca_lambdas: [0.3, 0.7, 1.0]
-  
-  # Strategy 1, 2, 3: Lags
-  lags_options: [1, 2]
-  
-  # All strategies: Ridge regularization
-  alphas: [0.01, 0.1, 1.0, 10.0]
-  
-  # Strategy 3: PC weighting
-  pc_weights: [0.5, 0.7]
-  
-  # Strategy 2, 3, 4: Client pattern weighting
-  client_pattern_weights: [0.3, 0.5, 0.8]
-  
-  # Strategy 4: Training window
-  training_windows: [4, 7, 10, null]
-  
-  # Model selection threshold
-  r2_threshold: 0.6
-
-# ───────────────────────────────────────────────────────────────
-# LOSS CONFIGURATION
-# ───────────────────────────────────────────────────────────────
-loss:
-  favor_overestimation: true
-  under_estimation_penalty: 2  # For ensemble pinball loss
-```
-
----
-
-## Feature Engineering for STF
-
-### Feature Types
-
-STF uses three main feature categories:
-
-```
-┌────────────────────────────────────────────────────────────┐
-│                    FEATURE TAXONOMY                         │
-├────────────────────────────────────────────────────────────┤
-│ 1. PATTERN FEATURES (Intrinsic)                            │
-│    • Principal Components (PC1, PC2, PC3, ...)             │
-│    • Lagged PCs (PC1_{t-1}, PC2_{t-1}, ...)               │
-│    • Growth rate lags (Growth_{t-1}, Growth_{t-2})        │
-│                                                             │
-│ 2. ECONOMIC FEATURES (Exogenous)                           │
-│    • Total GDP: pib_mdh                                    │
-│    • Sectoral GDP: gdp_primaire, gdp_secondaire,          │
-│                    gdp_tertiaire                           │
-│    • Transforms: level, lchg, lag_lchg                    │
-│                                                             │
-│ 3. CLIENT/POWER FEATURES (Context)                         │
-│    • Monthly clients: total_active_contrats               │
-│    • Puissance Facturée: puissance_facturee_total         │
-│    • Client lifecycle: just_started, two_years_old, etc.  │
-└────────────────────────────────────────────────────────────┘
-```
-
-### Economic Feature Configuration
-
-#### Feature Blocks
-
-Define **named sets** of economic indicators:
-
-```yaml
-features:
-  feature_blocks:
-    # Empty block: No economic features
-    none: []
-    
-    # Total GDP only
-    gdp_only: [pib_mdh]
-    
-    # Sectoral composition only
-    sectoral_only: [gdp_primaire, gdp_secondaire, gdp_tertiaire]
-    
-    # Full economic context
-    gdp_sectoral: [pib_mdh, gdp_primaire, gdp_secondaire, gdp_tertiaire]
-    
-    # Custom block example
-    custom: [pib_mdh, gdp_tertiaire, population]  # Your own combination
-```
-
-**The system will try each block** and select the best-performing combination.
-
-#### Feature Transforms
-
-Control **how** features are represented:
-
-```yaml
-features:
-  growth_feature_transforms:
-    - [level]       # Raw value (e.g., GDP = 1050 MDH)
-    - [lchg]        # Log-change: log(GDP_t / GDP_{t-1})
-    - [lag_lchg]    # Lagged log-change: log(GDP_{t-1} / GDP_{t-2})
-    - [lchg, lag_lchg]  # Both current and lagged changes
-```
-
-**Recommended for Growth Modeling**:
-```yaml
-growth_feature_transforms:
-  - [lag_lchg]           # Best: Use lagged changes
-  - [lchg, lag_lchg]     # Alternative: Current + lagged
-```
-
-**Why `lag_lchg`?**
-- Aligns timing: We're predicting Growth_t using GDP_{t-1} change
-- Avoids lookahead bias: Don't use GDP_t to predict Growth_t
-- Captures momentum: Recent economic trends inform future growth
-
-#### Feature Lags
-
-Control **how far back** to include features:
-
-```yaml
-features:
-  growth_feature_lags:
-    - [1]       # Only t-1
-    - [1, 2]    # t-1 and t-2
-    - [1, 2, 3] # t-1, t-2, and t-3
-```
-
-**Example**:
-```yaml
-# With GDP and lag=[1, 2]:
-# Features = [GDP_{t-1}, GDP_{t-2}]
-
-# With GDP, transform=[lag_lchg], lag=[1, 2]:
-# Features = [
-#     log(GDP_{t-1} / GDP_{t-2}),  # Recent change
-#     log(GDP_{t-2} / GDP_{t-3})   # Earlier change
-# ]
-```
-
-**Recommendation**:
-```yaml
-# Conservative (avoid overfitting)
-growth_feature_lags: [[1]]
-
-# Balanced (capture short-term dynamics)
-growth_feature_lags: [[1], [1, 2]]
-
-# Aggressive (long memory)
-growth_feature_lags: [[1, 2, 3]]
-```
-
-### Client Features (Strategy 3)
-
-Enable client-based features for Strategy 3:
-
-```yaml
-features:
-  use_monthly_clients_options: [true, false]
-```
-
-**What This Enables**:
-- Monthly active client counts
-- Client lifecycle stages (new, 2-year, 3-year, mature)
-- Client-based weighting in Strategy 3
-
-**CD Configuration**:
-```yaml
-features:
-  use_monthly_clients_options: [true, false]  # Try both
-```
-
-**SRM Configuration**:
-```yaml
-features:
-  use_monthly_clients_options: [true, false]  # Try both
-```
-
-### Puissance Facturée (CD Only)
-
-Enable billed power features for CD:
-
-```yaml
-features:
-  use_pf_options: [true, false]
-```
-
-**What This Enables**:
-- Total billed power (kW)
-- Power as predictor of consumption
-
-**CD Configuration**:
-```yaml
-features:
-  use_pf_options: [true, false]  # Try both
-```
-
-**SRM Configuration**:
-```yaml
-features:
-  use_pf_options: [false]  # Not applicable
-```
 
 ---
 
@@ -2530,221 +2276,76 @@ loss:
 
 ---
 
-## Feature Engineering for STF
+## Feature Configuration
 
-### Feature Types
-
-STF uses three main feature categories:
-
-```
-┌────────────────────────────────────────────────────────────┐
-│                    FEATURE TAXONOMY                         │
-├────────────────────────────────────────────────────────────┤
-│ 1. PATTERN FEATURES (Intrinsic)                            │
-│    • Principal Components (PC1, PC2, PC3, ...)             │
-│    • Lagged PCs (PC1_{t-1}, PC2_{t-1}, ...)               │
-│    • Growth rate lags (Growth_{t-1}, Growth_{t-2})        │
-│                                                             │
-│ 2. ECONOMIC FEATURES (Exogenous)                           │
-│    • Total GDP: pib_mdh                                    │
-│    • Sectoral GDP: gdp_primaire, gdp_secondaire,          │
-│                    gdp_tertiaire                           │
-│    • Transforms: level, lchg, lag_lchg                    │
-│                                                             │
-│ 3. CLIENT/POWER FEATURES (Context)                         │
-│    • Monthly clients: total_active_contrats               │
-│    • Puissance Facturée: puissance_facturee_total         │
-│    • Client lifecycle: just_started, two_years_old, etc.  │
-└────────────────────────────────────────────────────────────┘
-```
-
-### Economic Feature Configuration
-
-#### Feature Blocks
-
-Define **named sets** of economic indicators:
+### Feature Blocks
 
 ```yaml
 features:
   feature_blocks:
-    # Empty block: No economic features
     none: []
-    
-    # Total GDP only
     gdp_only: [pib_mdh]
-    
-    # Sectoral composition only
-    sectoral_only: [gdp_primaire, gdp_secondaire, gdp_tertiaire]
-    
-    # Full economic context
+    sectoral: [gdp_primaire, gdp_secondaire, gdp_tertiaire]
     gdp_sectoral: [pib_mdh, gdp_primaire, gdp_secondaire, gdp_tertiaire]
-    
-    # Custom block example
-    custom: [pib_mdh, gdp_tertiaire, population]  # Your own combination
 ```
 
-**The system will try each block** and select the best-performing combination.
+System tries all blocks, selects best performing.
 
-#### Feature Transforms
-
-Control **how** features are represented:
+### Growth Feature Transforms (Strategy 4)
 
 ```yaml
 features:
   growth_feature_transforms:
-    - [level]       # Raw value (e.g., GDP = 1050 MDH)
-    - [lchg]        # Log-change: log(GDP_t / GDP_{t-1})
-    - [lag_lchg]    # Lagged log-change: log(GDP_{t-1} / GDP_{t-2})
-    - [lchg, lag_lchg]  # Both current and lagged changes
+    - [level]        # Raw value: GDP_t
+    - [lchg]         # Log-change: log(GDP_t / GDP_{t-1})
+    - [lag_lchg]     # Lagged: log(GDP_{t-1} / GDP_{t-2})
 ```
 
-**Recommended for Growth Modeling**:
-```yaml
-growth_feature_transforms:
-  - [lag_lchg]           # Best: Use lagged changes
-  - [lchg, lag_lchg]     # Alternative: Current + lagged
-```
+Use `lag_lchg` to avoid lookahead bias when predicting Growth_t.
 
-**Why `lag_lchg`?**
-- Aligns timing: We're predicting Growth_t using GDP_{t-1} change
-- Avoids lookahead bias: Don't use GDP_t to predict Growth_t
-- Captures momentum: Recent economic trends inform future growth
-
-#### Feature Lags
-
-Control **how far back** to include features:
+### Growth Feature Lags (Strategy 4)
 
 ```yaml
 features:
   growth_feature_lags:
-    - [1]       # Only t-1
-    - [1, 2]    # t-1 and t-2
-    - [1, 2, 3] # t-1, t-2, and t-3
+    - [1]      # GDP_{t-1}
+    - [1, 2]   # GDP_{t-1}, GDP_{t-2}
 ```
 
-**Example**:
-```yaml
-# With GDP and lag=[1, 2]:
-# Features = [GDP_{t-1}, GDP_{t-2}]
-
-# With GDP, transform=[lag_lchg], lag=[1, 2]:
-# Features = [
-#     log(GDP_{t-1} / GDP_{t-2}),  # Recent change
-#     log(GDP_{t-2} / GDP_{t-3})   # Earlier change
-# ]
-```
-
-**Recommendation**:
-```yaml
-# Conservative (avoid overfitting)
-growth_feature_lags: [[1]]
-
-# Balanced (capture short-term dynamics)
-growth_feature_lags: [[1], [1, 2]]
-
-# Aggressive (long memory)
-growth_feature_lags: [[1, 2, 3]]
-```
-
-### Client Features (Strategy 3)
-
-Enable client-based features for Strategy 3:
+### Monthly Client Counts
 
 ```yaml
 features:
   use_monthly_clients_options: [true, false]
 ```
 
-**What This Enables**:
-- Monthly active client counts
-- Client lifecycle stages (new, 2-year, 3-year, mature)
-- Client-based weighting in Strategy 3
+Adds 12 monthly client count features. Required for Strategy 3 client weighting.
 
-**CD Configuration**:
-```yaml
-features:
-  use_monthly_clients_options: [true, false]  # Try both
-```
-
-**SRM Configuration**:
-```yaml
-features:
-  use_monthly_clients_options: [true, false]  # Try both
-```
-
-### Puissance Facturée (CD Only)
-
-Enable billed power features for CD:
+### Puissance Facturée (CD only)
 
 ```yaml
 features:
   use_pf_options: [true, false]
 ```
 
-**What This Enables**:
-- Total billed power (kW)
-- Power as predictor of consumption
-
-**CD Configuration**:
-```yaml
-features:
-  use_pf_options: [true, false]  # Try both
-```
-
-**SRM Configuration**:
-```yaml
-features:
-  use_pf_options: [false]  # Not applicable
-```
+Adds billed power features. Not applicable for SRM.
 
 ---
 
-## Model Hyperparameters
+## Hyperparameters
 
-### Grid Search Strategy
+### Grid Search
 
-STF uses **exhaustive grid search** over all hyperparameter combinations:
-
-```python
-# Pseudocode for grid generation
-for feature_block in feature_blocks:
-    for transform in growth_feature_transforms:
-        for lag in growth_feature_lags:
-            for use_clients in use_monthly_clients_options:
-                for use_pf in use_pf_options:
-                    for n_pc in [n_pcs]:  # Single value typically
-                        for lag_opt in lags_options:
-                            for alpha in alphas:
-                                for pc_weight in pc_weights:
-                                    for pca_lambda in pca_lambdas:
-                                        for train_window in training_windows:
-                                            for client_weight in client_pattern_weights:
-                                                # Generate configuration
-                                                # Run LOOCV
-                                                # Store results
+System tries all combinations:
+```
+configurations = product(feature_blocks, transforms, lags, alphas, ...)
 ```
 
-**Total Configurations**: Product of all list lengths!
+Configuration count = product of all list lengths.
 
-**Example**:
-```yaml
-features:
-  feature_blocks: {none: [], gdp: [pib_mdh]}  # 2 options
-  use_monthly_clients_options: [true, false]   # 2 options
+### Common Configurations
 
-model:
-  lags_options: [1, 2]                         # 2 options
-  alphas: [0.1, 1.0]                           # 2 options
-  pc_weights: [0.5, 0.8]                       # 2 options
-
-# Total: 2 × 2 × 2 × 2 × 2 = 32 configurations PER STRATEGY
-# With 4 strategies: 128 model evaluations!
-```
-
-### Hyperparameter Tuning Guidelines
-
-#### Starting Configuration (Conservative)
-
+**Minimal (fast)**:
 ```yaml
 model:
   n_pcs: 3
@@ -2752,170 +2353,82 @@ model:
   alphas: [0.1, 1.0, 10.0]
   pc_weights: [0.5, 0.8]
   pca_lambdas: [0.3]
-  training_windows: [null, 3]
+  training_windows: [null]
   client_pattern_weights: [0.5]
-  r2_threshold: 0.6
 ```
 
-**Why This Works**:
-- Moderate number of PCs
-- Short memory (1-2 lags)
-- Wide alpha range
-- Few training window options
-- Single client weight (if Strategy 3 not critical)
-
-**Expected Runtime**: ~5-10 minutes per entity
-
-#### Expanded Configuration (Thorough)
-
+**Standard**:
 ```yaml
 model:
   n_pcs: 3
-  lags_options: [1, 2, 3]
+  lags_options: [1, 2]
   alphas: [0.01, 0.1, 1.0, 10.0]
-  pc_weights: [0.3, 0.5, 0.7, 0.9]
-  pca_lambdas: [0.2, 0.3, 0.4]
-  training_windows: [null, 3, 5, 7]
+  pc_weights: [0.5, 0.8]
+  pca_lambdas: [0.3, 0.7]
+  training_windows: [null, 3, 7]
   client_pattern_weights: [0.3, 0.5, 0.8]
-  r2_threshold: 0.6
 ```
 
-**Why Use This**:
-- When you need the absolute best model
-- For critical forecasts (high stakes)
-- When runtime is not a constraint
-
-**Expected Runtime**: ~20-40 minutes per entity
-
-#### Aggressive Configuration (Maximum Flexibility)
-
+**Exhaustive**:
 ```yaml
 model:
-  n_pcs: 4  # More PCs
-  lags_options: [1, 2, 3, 4]  # Longer memory
-  alphas: [0.001, 0.01, 0.1, 1.0, 10.0, 100.0]  # Wide regularization range
-  pc_weights: [0.2, 0.4, 0.6, 0.8, 1.0]  # Full spectrum
-  pca_lambdas: [0.1, 0.2, 0.3, 0.5, 0.7]  # From smooth to rough
-  training_windows: [null, 2, 3, 5, 7, 10]  # Many windows
-  client_pattern_weights: [0.2, 0.4, 0.6, 0.8]
-  r2_threshold: 0.5  # More lenient
+  n_pcs: 4
+  lags_options: [1, 2, 3]
+  alphas: [0.01, 0.1, 1.0, 10.0, 100.0]
+  pc_weights: [0.3, 0.5, 0.7, 0.9]
+  pca_lambdas: [0.2, 0.3, 0.5, 0.7]
+  training_windows: [null, 3, 5, 7, 10]
+  client_pattern_weights: [0.3, 0.5, 0.8]
 ```
 
-**When to Use**:
-- Research/experimentation phase
-- Complex, non-stationary consumption
-- When overfitting risk is low (lots of data)
+### Parameter Effects
 
-**Warning**: Can take 1-2 hours per entity!
-
-### Hyperparameter Impact Summary
-
-| Parameter | Low Value | High Value | Sweet Spot |
-|-----------|-----------|------------|------------|
-| `n_pcs` | Captures only main trend | May overfit to noise | 3-4 |
-| `lags_options` | Short memory | Long memory | 1-2 |
-| `alphas` | Overfits training data | Underfits (too smooth) | 0.1-10.0 |
-| `pc_weights` | Trusts historical average | Trusts PCs completely | 0.5-0.8 |
-| `pca_lambdas` | Rough PCs (fits noise) | Very smooth PCs | 0.2-0.4 |
-| `training_windows` | Recent data only | All history | 3-5 or null |
-| `client_pattern_weights` | Ignores client signal | Fully client-driven | 0.3-0.7 |
+| Parameter | Effect |
+|-----------|--------|
+| `n_pcs` | Number of PCA components (3-4 typical) |
+| `lags_options` | Years of history for features |
+| `alphas` | Ridge regularization strength |
+| `pc_weights` | Weight of PC reconstruction vs historical average (Strategy 3) |
+| `pca_lambdas` | Temporal weighting: higher = more weight to recent years |
+| `training_windows` | Years of training data (null = all) |
+| `client_pattern_weights` | Power transform for R² in client weighting (Strategy 2, 3, 4) |
 
 ---
 
 ## Loss Configuration
 
-### Asymmetric Loss Function
-
-The system supports **asymmetric penalties** to favor overestimation:
+### Asymmetric Loss (Ensemble only)
 
 ```yaml
 loss:
   favor_overestimation: true
-  under_estimation_penalty: 1.5
+  under_estimation_penalty: 2.0
 ```
 
-### How It Works
-
-**Standard Loss** (favor_overestimation = false):
+Computes tau for pinball loss:
 ```python
-MAE = mean(|actual - predicted|)
+tau = under_estimation_penalty / (1 + under_estimation_penalty)
+# Example: 2.0 → tau = 0.67
 ```
 
-**Asymmetric Loss** (favor_overestimation = true):
-```python
-for each prediction:
-    error = actual - predicted
-    
-    if error > 0:  # Underestimation
-        weighted_error = error * under_estimation_penalty
-    else:  # Overestimation
-        weighted_error = error * 1.0
-    
-    total_loss += |weighted_error|
-```
+Ensemble learns bias correction factor λ by minimizing pinball loss on past years, then applies `(1 + λ)` scaling.
 
-### Example
-
-**Scenario**: Actual = 1000 kWh, Penalty = 1.5
-
-| Prediction | Error | Standard Loss | Asymmetric Loss | Ratio |
-|------------|-------|---------------|-----------------|-------|
-| 1050 kWh   | -50   | 50            | 50              | 1.0x  |
-| 950 kWh    | +50   | 50            | 75              | 1.5x  |
-| 900 kWh    | +100  | 100           | 150             | 1.5x  |
-
-**Effect**: Model is "punished" more for underestimating, leading to upward bias in predictions.
-
-### Configuration Guidance
-
-#### Neutral (No Bias)
+**Configuration**:
 ```yaml
+# Symmetric loss
 loss:
   favor_overestimation: false
-  under_estimation_penalty: 1.0  # Ignored when false
-```
 
-#### Mild Overestimation Bias
-```yaml
+# Mild upward bias
 loss:
   favor_overestimation: true
-  under_estimation_penalty: 1.2  # 20% higher cost for underestimation
-```
+  under_estimation_penalty: 1.5  # tau = 0.6
 
-#### Moderate Overestimation Bias (Recommended)
-```yaml
+# Strong upward bias  
 loss:
   favor_overestimation: true
-  under_estimation_penalty: 1.5  # 50% higher cost
+  under_estimation_penalty: 3.0  # tau = 0.75
 ```
-
-#### Strong Overestimation Bias
-```yaml
-loss:
-  favor_overestimation: true
-  under_estimation_penalty: 2.0  # 2x cost for underestimation
-```
-
-#### Aggressive Overestimation Bias
-```yaml
-loss:
-  favor_overestimation: true
-  under_estimation_penalty: 3.0  # 3x cost (use with caution)
-```
-
-### When to Use Asymmetric Loss
-
-✅ **Use Cases**:
-- Capacity planning (better to have excess than shortage)
-- Electricity supply (blackouts very costly)
-- Budget planning with safety margins
-- Infrastructure investment (underbuilding is expensive)
-
-❌ **Avoid When**:
-- Accurate point estimates are critical
-- Overestimation has high costs (e.g., resource waste)
-- Symmetric loss is business requirement
-- Evaluating model accuracy objectively
 
 ---
 
@@ -3038,1009 +2551,3 @@ RMSE = sqrt((1/n) × Σ(actual - predicted)²)
 - If RMSE ≈ MAE: Errors are relatively uniform
 
 ---
-
-## Practical Configuration Examples
-
-### Example 1: Conservative CD Configuration
-
-**Context**: Contract-level forecasting with reliable data, moderate volatility.
-
-```yaml
-# configs/stf_cd_conservative.yaml
-
-project:
-  project_root: .
-  exp_name: exp_conservative
-
-data:
-  variable: consommation_kwh
-  unit: Kwh
-  regions: null
-  run_levels: [1]
-  db_path: data/all_data.db
-
-evaluation:
-  eval_years_start: 2021
-  eval_years_end: 2023
-  train_start_year: 2013
-  training_end: null
-
-features:
-  feature_blocks:
-    none: []
-    gdp_only: [pib_mdh]
-  
-  growth_feature_transforms:
-    - [lag_lchg]
-  
-  growth_feature_lags:
-    - [1]
-  
-  use_monthly_clients_options: [false, true]
-  use_pf_options: [true]
-
-model:
-  n_pcs: 3
-  lags_options: [1, 2]
-  alphas: [0.1, 1.0, 10.0]
-  pc_weights: [0.5, 0.8]
-  pca_lambdas: [0.3]
-  training_windows: [null, 3]
-  client_pattern_weights: [0.5]
-  r2_threshold: 0.6
-
-loss:
-  favor_overestimation: true
-  under_estimation_penalty: 1.5
-  penalties_by_level: null
-```
-
-**Why This Configuration**:
-- Limited feature exploration (2 blocks)
-- Short memory (lags 1-2)
-- Moderate alpha range
-- Single smoothing parameter
-- Two training windows
-- Asymmetric loss for safe capacity planning
-
-**Expected Performance**: R² > 0.7, MAPE < 10%
-
----
-
-### Example 2: Aggressive SRM Configuration
-
-**Context**: Regional forecasting with complex patterns, need best possible accuracy.
-
-```yaml
-# configs/stf_srm_aggressive.yaml
-
-project:
-  project_root: .
-  exp_name: exp_aggressive
-
-data:
-  variable: consommation_kwh
-  unit: Kwh
-  regions:
-    Casablanca-Settat: 0
-    Fès-Meknès: 1
-    Marrakech-Safi: 0
-    Rabat-Salé-Kénitra: 0
-  run_levels: [0, 1]
-  db_path: data/all_data.db
-
-evaluation:
-  eval_years_start: 2021
-  eval_years_end: 2023
-  train_start_year: 2007  # More history for SRM
-  training_end: null
-
-features:
-  feature_blocks:
-    none: []
-    gdp_only: [pib_mdh]
-    sectoral_only: [gdp_primaire, gdp_secondaire, gdp_tertiaire]
-    gdp_sectoral: [pib_mdh, gdp_primaire, gdp_secondaire, gdp_tertiaire]
-  
-  growth_feature_transforms:
-    - [lag_lchg]
-    - [lchg, lag_lchg]
-  
-  growth_feature_lags:
-    - [1]
-    - [1, 2]
-  
-  use_monthly_clients_options: [true, false]
-  use_pf_options: [false]
-
-model:
-  n_pcs: 3
-  lags_options: [2, 3]
-  alphas: [0.1, 1.0, 10.0]
-  pc_weights: [0.2, 0.5, 0.8]
-  pca_lambdas: [0.3, 0.7, 1.0]
-  training_windows: [4, 7, 10]
-  client_pattern_weights: [0.3, 0.5, 0.8]
-  r2_threshold: 0.6
-
-loss:
-  favor_overestimation: true
-  under_estimation_penalty: 1.5
-  penalties_by_level: null
-```
-
-**Why This Configuration**:
-- Full feature exploration (4 blocks × 2 transforms × 2 lags = 16 combinations)
-- Longer memory (lags 2-3)
-- Wide PC weight range
-- Multiple smoothing parameters
-- Several training windows
-- Multiple client weights (Strategy 3 exploration)
-
-**Expected Performance**: R² > 0.75, MAPE < 8%
-**Expected Runtime**: 30-60 minutes per region
-
----
-
-### Example 3: Research/Experimentation Configuration
-
-**Context**: Exploring all possibilities, no time constraints.
-
-```yaml
-# configs/stf_research.yaml
-
-project:
-  project_root: .
-  exp_name: exp_research
-
-data:
-  variable: consommation_kwh
-  unit: Kwh
-  regions: null
-  run_levels: [1]
-  db_path: data/all_data.db
-
-evaluation:
-  eval_years_start: 2020
-  eval_years_end: 2023  # 4-year evaluation
-  train_start_year: 2010
-  training_end: null
-
-features:
-  feature_blocks:
-    none: []
-    gdp_only: [pib_mdh]
-    sectoral_only: [gdp_primaire, gdp_secondaire, gdp_tertiaire]
-    gdp_sectoral: [pib_mdh, gdp_primaire, gdp_secondaire, gdp_tertiaire]
-  
-  growth_feature_transforms:
-    - [level]
-    - [lchg]
-    - [lag_lchg]
-    - [lchg, lag_lchg]
-  
-  growth_feature_lags:
-    - [1]
-    - [1, 2]
-    - [1, 2, 3]
-  
-  use_monthly_clients_options: [true, false]
-  use_pf_options: [true, false]
-
-model:
-  n_pcs: 4  # More PCs for research
-  lags_options: [1, 2, 3, 4]
-  alphas: [0.001, 0.01, 0.1, 1.0, 10.0, 100.0]
-  pc_weights: [0.2, 0.4, 0.6, 0.8, 1.0]
-  pca_lambdas: [0.1, 0.2, 0.3, 0.5, 0.7, 1.0]
-  training_windows: [null, 2, 3, 5, 7, 10]
-  client_pattern_weights: [0.1, 0.3, 0.5, 0.7, 0.9]
-  r2_threshold: 0.5  # More lenient for exploration
-
-loss:
-  favor_overestimation: false  # Neutral for research
-  under_estimation_penalty: 1.0
-  penalties_by_level: null
-```
-
-**Why This Configuration**:
-- **Exhaustive exploration**: Trying every reasonable combination
-- **Multiple feature representations**: Level, changes, lagged changes
-- **Wide hyperparameter ranges**: From very conservative to very aggressive
-- **Long evaluation period**: 4 years of LOOCV
-- **Neutral loss**: No bias for objective evaluation
-
-**Expected Performance**: Will find the absolute best model
-**Expected Runtime**: 2-4 hours per entity
-**Use Case**: One-time analysis, research, benchmarking
-
----
-
-## Troubleshooting & Best Practices
-
-### Common Issues
-
-#### Issue 1: All Strategies Fail R² Threshold
-
-**Symptom**:
-```
-Warning: No model passes R² threshold (0.6).
-Falling back to highest R² model (Strategy 2, R²=0.45)
-```
-
-**Possible Causes**:
-1. **Insufficient historical data** (<5 years)
-2. **High consumption volatility** (structural breaks, irregular patterns)
-3. **Threshold too strict** for the data quality
-4. **Poor feature selection** (wrong economic indicators)
-5. **2020 COVID anomaly** affecting patterns
-
-**Solutions**:
-
-```yaml
-# Solution 1: Lower the threshold
-model:
-  r2_threshold: 0.5  # Or even 0.4 for very volatile data
-
-# Solution 2: Increase training data
-evaluation:
-  train_start_year: 2010  # Go further back if data available
-
-# Solution 3: Add more feature blocks
-features:
-  feature_blocks:
-    none: []
-    gdp_only: [pib_mdh]
-    sectoral_only: [gdp_primaire, gdp_secondaire, gdp_tertiaire]
-    gdp_sectoral: [pib_mdh, gdp_primaire, gdp_secondaire, gdp_tertiaire]
-    custom: [pib_mdh, population, inflation_rate]  # Try custom features
-
-# Solution 4: Widen hyperparameter search
-model:
-  alphas: [0.001, 0.01, 0.1, 1.0, 10.0, 100.0]  # Wider range
-  training_windows: [null, 2, 3, 5, 7, 10]  # More options
-```
-
-**Diagnostic Steps**:
-1. **Check data quality**: Plot consumption over time, look for anomalies
-2. **Examine feature correlations**: Do economic features correlate with consumption?
-3. **Analyze residuals**: Are errors random or systematic?
-4. **Try single strategies**: Which strategy performs best? Why?
-
----
-
-#### Issue 2: Strategy 3 Always Underperforms
-
-**Symptom**:
-```
-Strategy 3 (Hybrid): R²=0.52, MAPE=15%
-Strategy 1 (PC-Based): R²=0.78, MAPE=8%
-```
-
-**Possible Causes**:
-1. **Weak client-consumption correlation**
-2. **Client data quality issues** (missing months, outliers)
-3. **Consumption per client varies too much**
-4. **Wrong `client_pattern_weight` values**
-
-**Solutions**:
-
-```yaml
-# Solution 1: Verify client feature is enabled
-features:
-  use_monthly_clients_options: [true]  # Must be true for Strategy 3
-
-# Solution 2: Try lower client pattern weights
-model:
-  client_pattern_weights: [0.1, 0.2, 0.3]  # More conservative
-
-# Solution 3: Check if client data is reliable
-# If not, disable Strategy 3 exploration:
-features:
-  use_monthly_clients_options: [false]  # Skip Strategy 3 entirely
-```
-
-**Diagnostic**:
-```python
-# Check client-consumption correlation
-import pandas as pd
-import numpy as np
-
-# Load your data
-df = pd.read_sql("SELECT year, month, consommation_kwh, total_active_contrats FROM ...", conn)
-
-# Compute correlation
-corr = df['consommation_kwh'].corr(df['total_active_contrats'])
-print(f"Client-Consumption Correlation: {corr:.3f}")
-
-# If |corr| < 0.5, Strategy 3 will likely underperform
-```
-
----
-
-#### Issue 3: Predictions Are Too Conservative
-
-**Symptom**:
-```
-Year    Actual      Predicted   Error
-2021    10,500      9,800       -700 (underestimation)
-2022    11,000      10,200      -800 (underestimation)
-2023    11,500      10,600      -900 (underestimation)
-```
-
-**Possible Causes**:
-1. **Asymmetric loss not configured** (default is neutral)
-2. **Training window too long** (old data pulling predictions down)
-3. **High regularization** (alpha too large, overly smooth)
-4. **Missing recent growth drivers** (GDP projections outdated)
-
-**Solutions**:
-
-```yaml
-# Solution 1: Enable asymmetric loss
-loss:
-  favor_overestimation: true
-  under_estimation_penalty: 2.0  # Strongly penalize underestimation
-
-# Solution 2: Use shorter training windows
-model:
-  training_windows: [2, 3, 5]  # Favor recent years
-
-# Solution 3: Lower regularization
-model:
-  alphas: [0.01, 0.1, 1.0]  # Remove high alphas like 10.0, 100.0
-
-# Solution 4: Update economic projections
-# Ensure GDP forecasts in your database reflect recent growth
-```
-
-**Manual Adjustment** (if configuration doesn't help):
-```python
-# Apply a post-hoc adjustment factor
-adjustment_factor = 1.05  # 5% upward adjustment
-predictions_adjusted = predictions * adjustment_factor
-```
-
----
-
-#### Issue 4: Predictions Are Too Aggressive
-
-**Symptom**:
-```
-Year    Actual      Predicted   Error
-2021    10,500      11,200      +700 (overestimation)
-2022    11,000      11,800      +800 (overestimation)
-2023    11,500      12,400      +900 (overestimation)
-```
-
-**Possible Causes**:
-1. **Asymmetric loss too aggressive** (penalty too high)
-2. **Training window too short** (only recent high-growth years)
-3. **Over-optimistic GDP projections**
-4. **Low regularization** (overfitting to recent trends)
-
-**Solutions**:
-
-```yaml
-# Solution 1: Disable or reduce asymmetric loss
-loss:
-  favor_overestimation: false  # Neutral loss
-  # Or reduce penalty:
-  # favor_overestimation: true
-  # under_estimation_penalty: 1.2  # Mild bias
-
-# Solution 2: Use longer training windows
-model:
-  training_windows: [null, 7, 10]  # Include more history
-
-# Solution 3: Increase regularization
-model:
-  alphas: [1.0, 10.0, 100.0]  # Stronger smoothing
-
-# Solution 4: Check GDP projections
-# Ensure economic forecasts are realistic, not overly optimistic
-```
-
----
-
-#### Issue 5: High Variance Across Cross-Validation Folds
-
-**Symptom**:
-```
-Fold 2021: MAPE = 5%
-Fold 2022: MAPE = 15%  # Huge spike
-Fold 2023: MAPE = 6%
-```
-
-**Possible Causes**:
-1. **Outlier year** (2022 has anomaly: strike, policy change, weather event)
-2. **Insufficient training data** (LOOCV too sensitive with small sample)
-3. **Overfitting to specific years**
-
-**Solutions**:
-
-```yaml
-# Solution 1: Extend evaluation period (more folds)
-evaluation:
-  eval_years_start: 2019  # Add 2019, 2020
-  eval_years_end: 2023
-
-# Solution 2: Increase training data
-evaluation:
-  train_start_year: 2008  # Go further back
-
-# Solution 3: Strengthen regularization
-model:
-  alphas: [1.0, 10.0, 50.0]  # Higher alphas = smoother, less variance
-
-# Solution 4: Use longer training windows
-model:
-  training_windows: [null, 7, 10]  # More stability
-```
-
-**Investigation**:
-```python
-# Plot fold-specific errors
-import matplotlib.pyplot as plt
-
-fold_mapes = [5, 15, 6]  # Example
-years = [2021, 2022, 2023]
-
-plt.bar(years, fold_mapes)
-plt.axhline(y=10, color='r', linestyle='--', label='Acceptable threshold')
-plt.ylabel('MAPE (%)')
-plt.xlabel('Held-out Year')
-plt.title('LOOCV Fold Performance')
-plt.legend()
-plt.show()
-
-# Investigate 2022: Was there a structural break?
-```
-
----
-
-#### Issue 6: Ensemble Performs Worse Than Best Individual Strategy
-
-**Symptom**:
-```
-Strategy 1: R²=0.82, MAPE=7%
-Strategy 2: R²=0.75, MAPE=10%
-Ensemble:   R²=0.78, MAPE=8.5%  # Worse than Strategy 1
-```
-
-**Possible Causes**:
-1. **One strategy dominates** (ensemble dilutes it)
-2. **Strategies are too correlated** (no diversity benefit)
-3. **Weighting scheme suboptimal** (gives too much weight to weak strategies)
-
-**Why This Happens**:
-- Ensemble averages predictions, which can **regress toward mediocrity**
-- If Strategy 1 is clearly best, ensemble pulls it down toward weaker strategies
-
-**Solutions**:
-
-```yaml
-# Solution 1: Just use the best strategy (don't force ensemble)
-# The system already does this! 
-# Ensemble only wins if it actually performs best
-
-# Solution 2: Increase strategy diversity
-features:
-  feature_blocks:
-    none: []              # Pure patterns
-    gdp_only: [pib_mdh]   # Economic
-    sectoral: [gdp_primaire, gdp_secondaire, gdp_tertiaire]  # Sectoral
-  
-  use_monthly_clients_options: [true, false]  # Try with/without clients
-  use_pf_options: [true, false]  # Try with/without power
-```
-
-**Best Practice**: 
-- **Don't force ensemble usage**—let the system select it naturally
-- Ensemble is most valuable when strategies perform similarly (no clear winner)
-- If one strategy dominates (R² gap >0.1), use that strategy
-
----
-
-#### Issue 7: Runtime is Too Slow
-
-**Symptom**:
-```
-Running forecast for entity XYZ...
-[2 hours later...]
-Still running...
-```
-
-**Possible Causes**:
-1. **Hyperparameter grid too large** (too many combinations)
-2. **Long evaluation period** (many LOOCV folds)
-3. **Strategy 4 (GP) enabled** (computationally expensive)
-4. **Many entities/regions** (multiplicative effect)
-
-**Solutions**:
-
-```yaml
-# Solution 1: Reduce grid size
-model:
-  lags_options: [1, 2]          # Instead of [1, 2, 3, 4]
-  alphas: [0.1, 1.0, 10.0]      # Instead of [0.001, ..., 100.0]
-  pc_weights: [0.5, 0.8]        # Instead of [0.2, 0.4, 0.6, 0.8, 1.0]
-  pca_lambdas: [0.3]            # Single value instead of [0.1, 0.2, ..., 1.0]
-  training_windows: [null, 3]   # Just two options
-
-# Solution 2: Shorten evaluation period
-evaluation:
-  eval_years_start: 2022  # Only 2022-2023 (2 folds instead of 4)
-  eval_years_end: 2023
-
-# Solution 3: Disable Strategy 4 if not needed
-# (Requires code modification, or just accept it's slower)
-
-# Solution 4: Parallelize if possible
-# (Requires code modification to use multiprocessing)
-```
-
-**Runtime Estimates**:
-
-| Configuration | Entities | Expected Time |
-|--------------|----------|---------------|
-| Conservative | 10 | 1-2 hours |
-| Balanced | 10 | 2-4 hours |
-| Aggressive | 10 | 4-8 hours |
-| Research | 10 | 10-20 hours |
-
-**Optimization Tips**:
-- Start with a **single entity** to test configuration before running all
-- Use **Conservative config** for initial runs, then refine
-- Run **overnight** for large batches
-- Profile which strategy takes longest (usually Strategy 4)
-
----
-
-### Best Practices
-
-#### 1. Start Simple, Then Expand
-
-**Phase 1: Baseline (1-2 hours)**
-```yaml
-# Minimal configuration to establish baseline
-features:
-  feature_blocks:
-    none: []
-    gdp_only: [pib_mdh]
-  use_monthly_clients_options: [false]
-  use_pf_options: [true]  # CD only
-
-model:
-  n_pcs: 3
-  lags_options: [1, 2]
-  alphas: [0.1, 1.0, 10.0]
-  pc_weights: [0.5]
-  pca_lambdas: [0.3]
-  training_windows: [null]
-  client_pattern_weights: [0.5]
-  r2_threshold: 0.6
-
-loss:
-  favor_overestimation: false  # Neutral first
-```
-
-**Phase 2: Refinement (4-6 hours)**
-```yaml
-# Add complexity based on baseline results
-features:
-  feature_blocks:
-    none: []
-    gdp_only: [pib_mdh]
-    sectoral_only: [gdp_primaire, gdp_secondaire, gdp_tertiaire]
-  use_monthly_clients_options: [true, false]  # Explore Strategy 3
-
-model:
-  pc_weights: [0.5, 0.8]  # Expand slightly
-  training_windows: [null, 3, 5]  # Try windowed training
-  client_pattern_weights: [0.3, 0.5, 0.8]  # If Strategy 3 shows promise
-```
-
-**Phase 3: Fine-Tuning (8-12 hours)**
-```yaml
-# Full exploration for production
-features:
-  feature_blocks:
-    none: []
-    gdp_only: [pib_mdh]
-    sectoral_only: [gdp_primaire, gdp_secondaire, gdp_tertiaire]
-    gdp_sectoral: [pib_mdh, gdp_primaire, gdp_secondaire, gdp_tertiaire]
-  
-  growth_feature_transforms:
-    - [lag_lchg]
-    - [lchg, lag_lchg]
-  
-  growth_feature_lags:
-    - [1]
-    - [1, 2]
-
-model:
-  alphas: [0.01, 0.1, 1.0, 10.0]
-  pc_weights: [0.3, 0.5, 0.7, 0.9]
-  pca_lambdas: [0.2, 0.3, 0.4]
-  training_windows: [null, 3, 5, 7]
-
-loss:
-  favor_overestimation: true  # Apply business logic
-  under_estimation_penalty: 1.5
-```
-
----
-
-#### 2. Document Configuration Choices
-
-**Create a configuration log**:
-
-```yaml
-# configs/stf_cd_production.yaml
-
-# ═══════════════════════════════════════════════════════════════════════
-# CONFIGURATION NOTES
-# ═══════════════════════════════════════════════════════════════════════
-# Purpose: Production forecasting for CD (Contract level)
-# Date: 2026-01-08
-# Author: Data Science Team
-# 
-# Key Decisions:
-# - favor_overestimation=true: Capacity planning priority
-# - use_pf_options=[true]: Puissance Facturée is strong driver for CD
-# - training_windows=[null, 3, 5]: Balance recent vs. historical patterns
-# - r2_threshold=0.6: Standard threshold, sufficient for our data quality
-# 
-# Performance Baseline (2023 run):
-# - Average R²: 0.78
-# - Average MAPE: 8.2%
-# - Runtime: ~45 minutes for 12 contracts
-# 
-# Next Review: Q2 2026
-# ═══════════════════════════════════════════════════════════════════════
-
-project:
-  project_root: .
-  exp_name: exp_production_2026
-  
-# ... rest of config
-```
-
----
-
-#### 3. Validate Predictions Before Deployment
-
-**Sanity Checks**:
-
-```python
-import pandas as pd
-import numpy as np
-
-def validate_predictions(df_actual, df_predicted):
-    """
-    Perform sanity checks on predictions before deployment.
-    
-    Args:
-        df_actual: DataFrame with actual historical consumption
-        df_predicted: DataFrame with predicted consumption
-    """
-    issues = []
-    
-    # Check 1: No negative predictions
-    if (df_predicted['consommation_kwh'] < 0).any():
-        issues.append("ERROR: Negative predictions detected!")
-    
-    # Check 2: No extreme outliers (>3x or <0.3x previous year)
-    last_year_avg = df_actual['consommation_kwh'].tail(12).mean()
-    pred_avg = df_predicted['consommation_kwh'].mean()
-    
-    if pred_avg > 3 * last_year_avg:
-        issues.append(f"WARNING: Prediction ({pred_avg:.0f}) is 3x higher than last year ({last_year_avg:.0f})")
-    
-    if pred_avg < 0.3 * last_year_avg:
-        issues.append(f"WARNING: Prediction ({pred_avg:.0f}) is <30% of last year ({last_year_avg:.0f})")
-    
-    # Check 3: Seasonal pattern is preserved
-    pred_seasonal_std = df_predicted.groupby(df_predicted.index.month)['consommation_kwh'].std().mean()
-    if pred_seasonal_std == 0:
-        issues.append("WARNING: Predictions have no seasonal variation (flat line)")
-    
-    # Check 4: Annual growth is reasonable (-10% to +30%)
-    annual_growth = (pred_avg - last_year_avg) / last_year_avg
-    if annual_growth < -0.10:
-        issues.append(f"WARNING: Predicted decline of {annual_growth*100:.1f}% seems too steep")
-    if annual_growth > 0.30:
-        issues.append(f"WARNING: Predicted growth of {annual_growth*100:.1f}% seems too aggressive")
-    
-    # Report
-    if issues:
-        print("Validation Issues Found:")
-        for issue in issues:
-            print(f"  • {issue}")
-        return False
-    else:
-        print("✓ All validation checks passed")
-        return True
-
-# Usage
-validate_predictions(df_historical, df_forecast)
-```
-
----
-
-#### 4. Monitor Model Performance Over Time
-
-**Track metrics across forecasting periods**:
-
-```python
-# Create a performance tracking log
-performance_log = {
-    'run_date': '2026-01-08',
-    'config_version': 'stf_cd_production_v1',
-    'entities_forecasted': 12,
-    'metrics': {
-        'avg_r2': 0.78,
-        'avg_mape': 0.082,
-        'avg_mae': 450,
-        'runtime_minutes': 45
-    },
-    'best_strategies': {
-        'strategy_1': 5,  # Number of entities where Strategy 1 won
-        'strategy_2': 3,
-        'strategy_3': 2,
-        'ensemble': 2
-    }
-}
-
-# Save to JSON or database for tracking
-import json
-with open('performance_tracking.json', 'a') as f:
-    json.dump(performance_log, f)
-    f.write('\n')
-```
-
-**Quarterly Review Checklist**:
-- [ ] Are metrics stable or improving?
-- [ ] Is one strategy consistently winning? (Could simplify config)
-- [ ] Are there new features to incorporate? (New economic indicators)
-- [ ] Should thresholds be adjusted? (Based on actual performance)
-- [ ] Any data quality issues discovered?
-
----
-
-#### 5. Handle Special Cases
-
-**COVID-19 Year (2020)**:
-
-```yaml
-# Option 1: Impute 2020 (if available in LTF configs)
-data:
-  impute_2020: true  # Use interpolation to smooth 2020 anomaly
-
-# Option 2: Exclude 2020 from evaluation
-evaluation:
-  eval_years_start: 2021  # Start after COVID
-  eval_years_end: 2023
-
-# Option 3: Exclude 2020 from training
-evaluation:
-  train_start_year: 2013
-  training_end: 2019  # Stop before COVID
-  # Then separately train on 2021-2023
-```
-
-**New Contracts (Sparse History)**:
-
-```yaml
-# For contracts with <3 years of history, consider:
-
-# Option 1: Use more regularization
-model:
-  alphas: [1.0, 10.0, 100.0]  # Strong regularization
-
-# Option 2: Rely on Strategy 2 (external features)
-features:
-  feature_blocks:
-    gdp_sectoral: [pib_mdh, gdp_primaire, gdp_secondaire, gdp_tertiaire]
-
-# Option 3: Manual adjustment
-# (See Advanced Topics Guide for new entity handlers)
-```
-
-**Structural Breaks (Policy Changes, New Tariffs)**:
-
-```yaml
-# When known structural break occurred (e.g., 2020 policy change)
-
-# Option 1: Train only on post-break data
-evaluation:
-  train_start_year: 2020  # Start after the break
-
-# Option 2: Use short training windows
-model:
-  training_windows: [2, 3]  # Forget old regime quickly
-
-# Option 3: Manual segmentation
-# (Forecast pre/post break separately, then merge)
-```
-
----
-
-#### 6. Communication with Stakeholders
-
-**When R² is Low (<0.5)**:
-> "The model explains 45% of consumption variance. This is lower than our 60% target, suggesting high intrinsic volatility in this contract's consumption. Predictions should be interpreted as indicative trends rather than precise forecasts. We recommend wider planning margins (±20%) and quarterly re-forecasting."
-
-**When Ensemble Wins**:
-> "Multiple forecasting strategies performed similarly well. The final forecast combines their predictions, weighted by cross-validated accuracy. This ensemble approach provides more robust predictions by hedging against individual strategy failures."
-
-**When Asymmetric Loss is Applied**:
-> "Predictions are deliberately biased upward by ~5-10% to ensure sufficient capacity. This reflects our business priority: undersupply is more costly than slight oversupply. If precise point estimates are needed, we can provide neutral forecasts alongside these capacity-planning forecasts."
-
----
-
-#### 7. Feature Engineering Best Practices
-
-**For CD (Contracts)**:
-```yaml
-features:
-  # Always include:
-  use_pf_options: [true]  # Puissance Facturée is critical
-  
-  # Often useful:
-  use_monthly_clients_options: [true]  # If client dynamics matter
-  
-  # Economic features: Moderate importance
-  feature_blocks:
-    gdp_only: [pib_mdh]  # Start simple
-    gdp_sectoral: [pib_mdh, gdp_primaire, gdp_secondaire, gdp_tertiaire]  # If sectoral matters
-```
-
-**For SRM (Regions)**:
-```yaml
-features:
-  # Always include:
-  use_monthly_clients_options: [true]  # Regional client evolution important
-  
-  # Never include:
-  use_pf_options: [false]  # Not applicable to SRM
-  
-  # Economic features: High importance
-  feature_blocks:
-    gdp_sectoral: [pib_mdh, gdp_primaire, gdp_secondaire, gdp_tertiaire]  # Regional GDP critical
-```
-
----
-
-#### 8. Debugging Workflow
-
-**When forecasts look wrong**:
-
-```
-Step 1: Check Data
-─────────────────────────────────────
-• Plot historical consumption
-• Look for outliers, missing months
-• Verify client data (if using Strategy 3)
-• Check economic feature values
-
-Step 2: Check Configuration
-─────────────────────────────────────
-• Is r2_threshold too strict?
-• Are feature blocks appropriate?
-• Is asymmetric loss configured correctly?
-• Are training windows sensible?
-
-Step 3: Examine Strategy Performance
-─────────────────────────────────────
-• Which strategy won? Why?
-• Are other strategies far behind?
-• Check LOOCV fold-specific performance
-• Look at residuals (systematic vs. random)
-
-Step 4: Validate Predictions
-─────────────────────────────────────
-• Run sanity checks (see above)
-• Compare to naive baseline (last year's consumption)
-• Check seasonal patterns
-• Verify annual growth rate is reasonable
-
-Step 5: Iterate
-─────────────────────────────────────
-• Adjust configuration based on findings
-• Re-run and compare
-• Document what changed and why
-```
-
----
-
-### Quick Reference: Common Configuration Patterns
-
-#### Pattern 1: "Safe Capacity Planning"
-```yaml
-features:
-  feature_blocks:
-    gdp_sectoral: [pib_mdh, gdp_primaire, gdp_secondaire, gdp_tertiaire]
-
-model:
-  r2_threshold: 0.6
-  alphas: [0.1, 1.0, 10.0]
-  training_windows: [null, 5, 7]
-
-loss:
-  favor_overestimation: true
-  under_estimation_penalty: 1.8  # Strong upward bias
-```
-
-#### Pattern 2: "Accurate Point Estimates"
-```yaml
-features:
-  feature_blocks:
-    none: []
-    gdp_only: [pib_mdh]
-    sectoral_only: [gdp_primaire, gdp_secondaire, gdp_tertiaire]
-
-model:
-  r2_threshold: 0.6
-  alphas: [0.01, 0.1, 1.0, 10.0]
-  training_windows: [null, 3, 5, 7]
-
-loss:
-  favor_overestimation: false  # Neutral
-```
-
-#### Pattern 3: "Adapt Quickly to Changes"
-```yaml
-features:
-  feature_blocks:
-    gdp_sectoral: [pib_mdh, gdp_primaire, gdp_secondaire, gdp_tertiaire]
-
-model:
-  r2_threshold: 0.5  # More lenient
-  alphas: [0.01, 0.1, 1.0]  # Lower regularization
-  training_windows: [2, 3, 5]  # Short windows, recent focus
-
-loss:
-  favor_overestimation: false
-```
-
-#### Pattern 4: "Stable Long-Term Trends"
-```yaml
-features:
-  feature_blocks:
-    none: []  # Pure historical patterns
-
-model:
-  r2_threshold: 0.6
-  alphas: [1.0, 10.0, 100.0]  # High regularization
-  training_windows: [null, 10]  # Long history
-
-loss:
-  favor_overestimation: false
-```
-
----
-
-### Summary: Key Takeaways
-
-| Aspect | Recommendation |
-|--------|---------------|
-| **Starting Point** | Use Conservative config, iterate based on results |
-| **R² Threshold** | 0.6 for good data, 0.5 for volatile data, 0.7 for critical forecasts |
-| **Feature Blocks** | Start with `gdp_only`, expand to `gdp_sectoral` if helps |
-| **Asymmetric Loss** | Enable for capacity planning, disable for accuracy evaluation |
-| **Training Windows** | `[null, 3, 5]` balances history and adaptability |
-| **Runtime** | Conservative: <10 min/entity, Balanced: 20-40 min, Aggressive: 1-2 hours |
-| **Validation** | Always run sanity checks before deploying predictions |
-| **Monitoring** | Track performance quarterly, adjust config as needed |
-
----
-
-**Next Guide**: [Long-Term Forecasting Configuration Guide](ltf_configuration.md) for GP models and trend priors.
-
----
-
-**Document Version**: 2.0  
-**Last Updated**: January 2026  
-**Maintained By**: Data Science Team
