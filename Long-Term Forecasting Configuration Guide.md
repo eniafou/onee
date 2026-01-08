@@ -8,13 +8,12 @@
 5. [Prior Strategies](#prior-strategies)
 6. [Feature Configuration](#feature-configuration)
 7. [Running the Forecast](#running-the-forecast)
-8. [Configuration Examples](#configuration-examples)
 
 ---
 
 ## Introduction
 
-Long-Term Forecasting (LTF) provides **5-year ahead** electricity consumption predictions using **Gaussian Process (GP) regression** combined with deterministic trend priors. The system supports multiple prior strategies and can operate on regional data (SRM) or contract/distributor data (CD).
+Long-Term Forecasting (LTF) provides **5-year ahead** electricity consumption predictions using **Gaussian Process (GP) regression** combined with deterministic trend priors. The system supports multiple prior strategies and can operate on SRM or CD.
 
 ### Key Characteristics
 
@@ -22,7 +21,7 @@ Long-Term Forecasting (LTF) provides **5-year ahead** electricity consumption pr
 |--------|---------|
 | **Time Horizon** | 5 years ahead (annual predictions) |
 | **Methodology** | Gaussian Process + Trend Priors |
-| **Validation** | Leave-One-Out Cross-Validation (LOOCV) |
+| **Validation** | Expanding Window Cross-Validation (Walk-Forward) |
 | **Model Types** | GaussianProcessForecastModel, IntensityForecastWrapper |
 | **Output** | Annual predictions with confidence intervals |
 
@@ -40,20 +39,20 @@ The LTF system uses **two model types**:
 │ ForecastModel   │ • GP regression on annual consumption         │
 │                 │ • Combines trend prior + GP residuals         │
 │                 │ • Confidence intervals from GP uncertainty    │
-│                 │ • Best for SRM (regional) data                │
+│                 │ • Used for SRM data                │
 ├─────────────────┼───────────────────────────────────────────────┤
 │ Intensity       │ Normalized Prediction (CD-specific)           │
 │ ForecastWrapper │ • Normalizes consumption by driver variable   │
 │                 │ • Predicts consumption per unit (intensity)   │
 │                 │ • Scales back using forecasted driver values  │
-│                 │ • Best for CD (contract/distributor) data     │
+│                 │ • Used for CD data     │
 └─────────────────┴───────────────────────────────────────────────┘
 ```
 
 ### Model Selection Logic
 
 ```
-1. Run LOOCV grid search across all configurations
+1. Run expanding window CV grid search across all configurations
    ↓
 2. R² Threshold Filter (default: 0.6)
    ↓
@@ -122,12 +121,13 @@ For each future year:
     5. If log transformed: y_pred_t = exp(y_pred_t)
     6. Confidence interval: y_pred_t ± (1.96 * std_t)
 
-STEP 8: Cross-Validation (LOOCV)
-─────────────────────────────────
-For each test year:
-    • Train on all other years
+STEP 8: Cross-Validation (Expanding Window)
+────────────────────────────────────────────
+For each test year (starting from year 3):
+    • Train on all PRIOR years only (respects temporal order)
     • Predict test year
     • Compute metrics (R², MAPE, etc.)
+    • Prevents future data leakage
 ```
 
 ### Configuration Parameters
@@ -421,188 +421,3 @@ outputs/outputs_horizon_cd/     # CD outputs
 - `Actual_Annual`: Actual value (for CV years)
 - `Percent_Error`: Percentage error
 - Model configuration parameters (flattened)
-
----
-
-## Configuration Examples
-
-### Example 1: SRM Regional Forecast (Standard)
-
-```yaml
-# ltf_srm.yaml
-data:
-  target_variable: consommation_kwh
-  regions:
-    - Casablanca-Settat
-    - Marrakech-Safi
-    # ... other regions
-  run_levels: [1]  # 1=SRM level
-
-temporal:
-  horizon: 5
-  forecast_runs:
-    - [2013, 2018]  # Train: 2013-2017, Test: 2018
-
-features:
-  transforms:
-    - [lchg]
-    - [lchg, lag_lchg]
-  lags:
-    - [1, 2]
-  feature_block:
-    - []
-    - [pib_mdh]
-  use_pf: [false]
-  use_clients: [true]
-  training_window: [null]
-
-models:
-  r2_threshold: 0.6
-  models:
-    - model_type: GaussianProcessForecastModel
-      kernel_key: ["rbf_white"]
-      n_restarts_optimizer: [10]
-      normalize_y: [true, false]
-      use_log_transform: [true]
-      alpha: [1e-10]
-      remove_outliers: [False]
-      
-      prior_config:
-        - type: LinearGrowthPrior
-          min_annual_growth: 0.02
-          anchor_window: 3
-```
-
----
-
-### Example 2: CD Contract-Based Forecast (Intensity)
-
-```yaml
-# ltf_cd.yaml
-data:
-  target_variable: consommation_kwh
-  regions: null  # CD operates on contracts
-  run_levels: [2]  # 2=Regional aggregation of contracts
-
-temporal:
-  horizon: 5
-  forecast_runs:
-    - [2013, 2018]
-
-features:
-  transforms:
-    - [level]
-    - [level, lag]
-  lags:
-    - [1, 2]
-  feature_block:
-    - [total_active_contrats, puissance_facturee_total, 
-       just_started, two_years_old, three_years_old, 
-       more_than_3_years_old, pib_mdh]
-  use_pf: [true]
-  use_clients: [false]
-  training_window: [null]
-
-models:
-  r2_threshold: 0.6
-  models:
-    - model_type: IntensityForecastWrapper
-      
-      # Normalization
-      normalization_col: [total_active_contrats]
-      
-      # Internal GP parameters
-      kernel_key: ["matern_white"]
-      n_restarts_optimizer: [10]
-      normalize_y: [true, false]
-      use_log_transform: [false]  # Intensity already normalized
-      alpha: [1e-10]
-      remove_outliers: [False]
-      
-      prior_config:
-        - type: AugmentedConsensusPrior
-          power: 0.5
-          anchor_window: 1
-          min_annual_growth: null
-          exog_col_idx: 0
-          driver_weight: 0.0
-          memory_decay: 0.2
-          use_dynamic_weights: False
-```
-
----
-
-### Example 3: Multi-Prior Comparison
-
-```yaml
-# Try multiple prior strategies simultaneously
-models:
-  r2_threshold: 0.6
-  models:
-    - model_type: GaussianProcessForecastModel
-      kernel_key: ["rbf_white"]
-      n_restarts_optimizer: [10]
-      normalize_y: [true]
-      use_log_transform: [true]
-      alpha: [1e-10]
-      
-      prior_config:
-        # Linear growth with floor
-        - type: LinearGrowthPrior
-          min_annual_growth: 0.02
-          anchor_window: 3
-        
-        # Slowing growth
-        - type: PowerGrowthPrior
-          power: 0.5
-          anchor_window: 3
-          min_annual_growth: 0.02
-        
-        # Pure GP (no prior)
-        - type: NeutralPrior
-```
-
-The system will evaluate all combinations and select the best performer.
-
----
-
-### Key Differences: SRM vs CD
-
-| Aspect | SRM (Regional) | CD (Contracts) |
-|--------|----------------|----------------|
-| **Model** | GaussianProcessForecastModel | IntensityForecastWrapper |
-| **Transform** | `lchg` (log-changes) | `level` (raw values) |
-| **Log Transform** | `true` | `false` |
-| **Features** | `use_clients: true` | `use_pf: true` |
-| **Normalization** | N/A | By `total_active_contrats` |
-| **Growth Prior** | LinearGrowthPrior | AugmentedConsensusPrior |
-
----
-
-## Tips & Best Practices
-
-1. **Start Simple:** Begin with `LinearGrowthPrior` + `rbf_white` kernel
-2. **Log Transform:** Use for exponential growth (SRM), skip for intensity (CD)
-3. **Training Window:** `null` uses all history, specify `N` for recent-only
-4. **R² Threshold:** Lower to 0.5 if struggling to find good models
-5. **Prior Tuning:**
-   - `anchor_window: 3` is usually robust
-   - `min_annual_growth: 0.02` enforces 2% floor
-   - Try `power: 0.5` for slowing growth markets
-6. **Kernel Selection:**
-   - `rbf_white`: Smooth patterns (default)
-   - `matern_white`: Rough/noisy data
-   - `rbf_long`: Long-term trends only
-7. **Feature Engineering:** More transforms = more overfitting risk. Start minimal.
-
----
-
-## Troubleshooting
-
-| Issue | Solution |
-|-------|----------|
-| All models fail R² threshold | Lower `r2_threshold` or add more features |
-| Overfitting (high R², poor MAPE) | Reduce features, increase `alpha`, use simpler kernel |
-| Underfitting | Add more features, try `PowerGrowthPrior`, lower `alpha` |
-| Unstable predictions | Increase `anchor_window`, add `min_annual_growth` |
-| Negative forecasts | Use `use_log_transform: true` or set `min_annual_growth` |
