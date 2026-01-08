@@ -3,7 +3,7 @@ import warnings
 
 import pandas as pd
 from pathlib import Path
-from short_term_forecast_strategies import run_analysis_for_entity, save_summary, get_move_in_year
+from onee.short_term_forecast_strategies import run_analysis_for_entity, save_summary, get_move_in_year
 from new_entities_handlers import handle_similarity_entity_prediction, handle_growth_entity_prediction
 import pickle
 from onee.config.stf_config import ShortTermForecastConfig

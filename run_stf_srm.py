@@ -7,7 +7,7 @@ import pandas as pd
 import numpy as np
 import sys
 
-from short_term_forecast_strategies import run_analysis_for_entity, save_summary
+from onee.short_term_forecast_strategies import run_analysis_for_entity, save_summary
 from onee.utils import clean_name
 from onee.config.stf_config import ShortTermForecastConfig
 from onee.data.loader import DataLoader

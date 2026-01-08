@@ -2,7 +2,7 @@
 # run_horizon_forecast_srm.py (Clean + Correct)
 # ─────────────────────────────────────────────────────────────
 
-from short_term_forecast_strategies import (
+from onee.short_term_forecast_strategies import (
     create_monthly_matrix,
 )
 from long_term_forecast_strategies import run_long_horizon_forecast, create_summary_dataframe
