@@ -8,7 +8,7 @@
 5. [Strategy 3: Hybrid Approach](#strategy-3-hybrid-approach)
 6. [Strategy 4: Advanced Growth Rate Model](#strategy-4-advanced-growth-rate-model)
 7. [Strategy 5: Ensemble Integration](#strategy-5-ensemble-integration)
-8. [Feature Engineering for STF](#feature-engineering-for-stf)
+8. [Feature Configuration](#feature-engineering-for-stf)
 9.  [Model Hyperparameters](#model-hyperparameters)
 10. [Loss Configuration](#loss-configuration)
 11. [Evaluation Methodology](#evaluation-methodology)
@@ -724,6 +724,63 @@ The `under_estimation_penalty` controls the asymmetric bias:
 - Ensemble applies learned bias correction factor
 
 ---
+
+## Feature Configuration
+
+### Feature Blocks
+
+```yaml
+features:
+  feature_blocks:
+    none: []
+    gdp_only: [pib_mdh]
+    sectoral: [gdp_primaire, gdp_secondaire, gdp_tertiaire]
+    gdp_sectoral: [pib_mdh, gdp_primaire, gdp_secondaire, gdp_tertiaire]
+```
+
+System tries all blocks, selects best performing.
+
+### Growth Feature Transforms (Strategy 4)
+
+```yaml
+features:
+  growth_feature_transforms:
+    - [level]        # Raw value: GDP_t
+    - [lchg]         # Log-change: log(GDP_t / GDP_{t-1})
+    - [lag_lchg]     # Lagged: log(GDP_{t-1} / GDP_{t-2})
+```
+
+Use `lag_lchg` to avoid lookahead bias when predicting Growth_t.
+
+### Growth Feature Lags (Strategy 4)
+
+```yaml
+features:
+  growth_feature_lags:
+    - [1]      # GDP_{t-1}
+    - [1, 2]   # GDP_{t-1}, GDP_{t-2}
+```
+
+### Monthly Client Counts
+
+```yaml
+features:
+  use_monthly_clients_options: [true, false]
+```
+
+Adds 12 monthly client count features. Required for Strategy 3 client weighting.
+
+### Puissance Facturée (CD only)
+
+```yaml
+features:
+  use_pf_options: [true, false]
+```
+
+Adds billed power features. Not applicable for SRM.
+
+---
+
 
 ## Model Hyperparameters
 
