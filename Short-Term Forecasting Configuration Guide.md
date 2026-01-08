@@ -9,7 +9,7 @@
 6. [Strategy 4: Advanced Growth Rate Model](#strategy-4-advanced-growth-rate-model)
 7. [Strategy 5: Ensemble Integration](#strategy-5-ensemble-integration)
 8. [Feature Configuration](#feature-configuration)
-9.  [Model Hyperparameters](#model-hyperparameters)
+9.  [Hyperparameters](#hyperparameters)
 10. [Loss Configuration](#loss-configuration)
 11. [Evaluation Methodology](#evaluation-methodology)
 
@@ -782,45 +782,20 @@ Adds billed power features. Not applicable for SRM.
 ---
 
 
-## Model Hyperparameters
+## Hyperparameters
 
-### Grid Search Strategy
+### Grid Search
 
-STF uses **exhaustive grid search** over all hyperparameter combinations:
-
-```python
-for strategy in [1, 2, 3, 4]:
-    for feature_block in feature_blocks:
-        for lag in lags_options:
-            for alpha in alphas:
-                # ... other params specific to strategy
-                train_and_evaluate()
+System tries all combinations:
+```
+configurations = product(feature_blocks, transforms, lags, alphas, ...)
 ```
 
-**Total Configurations Example**:
-```yaml
-features:
-  feature_blocks: {none: [], gdp: [pib_mdh]}     # 2 options
-  use_monthly_clients_options: [true, false]     # 2 options
+Configuration count = product of all list lengths.
 
-model:
-  lags_options: [1, 2]                           # 2 options
-  alphas: [0.1, 1.0]                             # 2 options
-  pc_weights: [0.5, 0.8]                         # 2 options (Strategy 3)
+### Common Configurations
 
-# Strategy 1: 2 × 2 × 2 × 2 = 16 configurations
-# Strategy 2: 2 × 2 × 2 × 2 = 16 configurations  
-# Strategy 3: 2 × 2 × 2 × 2 × 2 = 32 configurations
-# Strategy 4: 2 × 2 × 2 = 8 configurations
-# Total: 72 model evaluations
-```
-
----
-
-### Hyperparameter Tuning Guidelines
-
-#### Starting Configuration (Conservative)
-
+**Minimal (fast)**:
 ```yaml
 model:
   n_pcs: 3
@@ -828,170 +803,82 @@ model:
   alphas: [0.1, 1.0, 10.0]
   pc_weights: [0.5, 0.8]
   pca_lambdas: [0.3]
-  training_windows: [null, 3]
+  training_windows: [null]
   client_pattern_weights: [0.5]
-  r2_threshold: 0.6
 ```
 
-**Why This Works**:
-- Moderate number of PCs
-- Short memory (1-2 lags)
-- Wide alpha range
-- Few training window options
-- Single client weight (if Strategy 3 not critical)
-
-**Expected Runtime**: ~5-10 minutes per entity
-
-#### Expanded Configuration (Thorough)
-
+**Standard**:
 ```yaml
 model:
   n_pcs: 3
-  lags_options: [1, 2, 3]
+  lags_options: [1, 2]
   alphas: [0.01, 0.1, 1.0, 10.0]
-  pc_weights: [0.3, 0.5, 0.7, 0.9]
-  pca_lambdas: [0.2, 0.3, 0.4]
-  training_windows: [null, 3, 5, 7]
+  pc_weights: [0.5, 0.8]
+  pca_lambdas: [0.3, 0.7]
+  training_windows: [null, 3, 7]
   client_pattern_weights: [0.3, 0.5, 0.8]
-  r2_threshold: 0.6
 ```
 
-**Why Use This**:
-- When you need the absolute best model
-- For critical forecasts (high stakes)
-- When runtime is not a constraint
-
-**Expected Runtime**: ~20-40 minutes per entity
-
-#### Aggressive Configuration (Maximum Flexibility)
-
+**Exhaustive**:
 ```yaml
 model:
-  n_pcs: 4  # More PCs
-  lags_options: [1, 2, 3, 4]  # Longer memory
-  alphas: [0.001, 0.01, 0.1, 1.0, 10.0, 100.0]  # Wide regularization range
-  pc_weights: [0.2, 0.4, 0.6, 0.8, 1.0]  # Full spectrum
-  pca_lambdas: [0.1, 0.2, 0.3, 0.5, 0.7]  # From smooth to rough
-  training_windows: [null, 2, 3, 5, 7, 10]  # Many windows
-  client_pattern_weights: [0.2, 0.4, 0.6, 0.8]
-  r2_threshold: 0.5  # More lenient
+  n_pcs: 4
+  lags_options: [1, 2, 3]
+  alphas: [0.01, 0.1, 1.0, 10.0, 100.0]
+  pc_weights: [0.3, 0.5, 0.7, 0.9]
+  pca_lambdas: [0.2, 0.3, 0.5, 0.7]
+  training_windows: [null, 3, 5, 7, 10]
+  client_pattern_weights: [0.3, 0.5, 0.8]
 ```
 
-**When to Use**:
-- Research/experimentation phase
-- Complex, non-stationary consumption
-- When overfitting risk is low (lots of data)
+### Parameter Effects
 
-**Warning**: Can take 1-2 hours per entity!
-
-### Hyperparameter Impact Summary
-
-| Parameter | Low Value | High Value | Sweet Spot |
-|-----------|-----------|------------|------------|
-| `n_pcs` | Captures only main trend | May overfit to noise | 3-4 |
-| `lags_options` | Short memory | Long memory | 1-2 |
-| `alphas` | Overfits training data | Underfits (too smooth) | 0.1-10.0 |
-| `pc_weights` | Trusts historical average | Trusts PCs completely | 0.5-0.8 |
-| `pca_lambdas` | Rough PCs (fits noise) | Very smooth PCs | 0.2-0.4 |
-| `training_windows` | Recent data only | All history | 3-5 or null |
-| `client_pattern_weights` | Ignores client signal | Fully client-driven | 0.3-0.7 |
+| Parameter | Effect |
+|-----------|--------|
+| `n_pcs` | Number of PCA components (3-4 typical) |
+| `lags_options` | Years of history for features |
+| `alphas` | Ridge regularization strength |
+| `pc_weights` | Weight of PC reconstruction vs historical average (Strategy 3) |
+| `pca_lambdas` | Temporal weighting: higher = more weight to recent years |
+| `training_windows` | Years of training data (null = all) |
+| `client_pattern_weights` | Power transform for R² in client weighting (Strategy 2, 3, 4) |
 
 ---
 
 ## Loss Configuration
 
-### Asymmetric Loss Function
-
-The system supports **asymmetric penalties** to favor overestimation:
+### Asymmetric Loss (Ensemble only)
 
 ```yaml
 loss:
   favor_overestimation: true
-  under_estimation_penalty: 1.5
+  under_estimation_penalty: 2.0
 ```
 
-### How It Works
-
-**Standard Loss** (favor_overestimation = false):
+Computes tau for pinball loss:
 ```python
-MAE = mean(|actual - predicted|)
+tau = under_estimation_penalty / (1 + under_estimation_penalty)
+# Example: 2.0 → tau = 0.67
 ```
 
-**Asymmetric Loss** (favor_overestimation = true):
-```python
-for each prediction:
-    error = actual - predicted
-    
-    if error > 0:  # Underestimation
-        weighted_error = error * under_estimation_penalty
-    else:  # Overestimation
-        weighted_error = error * 1.0
-    
-    total_loss += |weighted_error|
-```
+Ensemble learns bias correction factor λ by minimizing pinball loss on past years, then applies `(1 + λ)` scaling.
 
-### Example
-
-**Scenario**: Actual = 1000 kWh, Penalty = 1.5
-
-| Prediction | Error | Standard Loss | Asymmetric Loss | Ratio |
-|------------|-------|---------------|-----------------|-------|
-| 1050 kWh   | -50   | 50            | 50              | 1.0x  |
-| 950 kWh    | +50   | 50            | 75              | 1.5x  |
-| 900 kWh    | +100  | 100           | 150             | 1.5x  |
-
-**Effect**: Model is "punished" more for underestimating, leading to upward bias in predictions.
-
-### Configuration Guidance
-
-#### Neutral (No Bias)
+**Configuration**:
 ```yaml
+# Symmetric loss
 loss:
   favor_overestimation: false
-  under_estimation_penalty: 1.0  # Ignored when false
-```
 
-#### Mild Overestimation Bias
-```yaml
+# Mild upward bias
 loss:
   favor_overestimation: true
-  under_estimation_penalty: 1.2  # 20% higher cost for underestimation
-```
+  under_estimation_penalty: 1.5  # tau = 0.6
 
-#### Moderate Overestimation Bias (Recommended)
-```yaml
+# Strong upward bias  
 loss:
   favor_overestimation: true
-  under_estimation_penalty: 1.5  # 50% higher cost
+  under_estimation_penalty: 3.0  # tau = 0.75
 ```
-
-#### Strong Overestimation Bias
-```yaml
-loss:
-  favor_overestimation: true
-  under_estimation_penalty: 2.0  # 2x cost for underestimation
-```
-
-#### Aggressive Overestimation Bias
-```yaml
-loss:
-  favor_overestimation: true
-  under_estimation_penalty: 3.0  # 3x cost (use with caution)
-```
-
-### When to Use Asymmetric Loss
-
-✅ **Use Cases**:
-- Capacity planning (better to have excess than shortage)
-- Electricity supply (blackouts very costly)
-- Budget planning with safety margins
-- Infrastructure investment (underbuilding is expensive)
-
-❌ **Avoid When**:
-- Accurate point estimates are critical
-- Overestimation has high costs (e.g., resource waste)
-- Symmetric loss is business requirement
-- Evaluating model accuracy objectively
 
 ---
 
