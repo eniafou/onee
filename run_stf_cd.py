@@ -4,13 +4,13 @@ import warnings
 import pandas as pd
 from pathlib import Path
 from onee.short_term_forecast_strategies import run_analysis_for_entity, save_summary, get_move_in_year
-from new_entities_handlers import handle_similarity_entity_prediction, handle_growth_entity_prediction
+from onee.new_entities_handlers import handle_similarity_entity_prediction, handle_growth_entity_prediction
 import pickle
 from onee.config.stf_config import ShortTermForecastConfig
 from onee.data.loader import DataLoader
 from onee.data.names import Aliases
 import joblib
-from full_forecast_utils import (
+from onee.full_forecast_utils import (
     rename_to_stf_cd_results,
 )
 warnings.filterwarnings('ignore')

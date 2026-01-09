@@ -8,7 +8,7 @@ from run_ltf_cd import run_ltf_cd_forecast, prepare_prediction_output as prepare
 from onee.data.names import Aliases
 import numpy as np
 
-from full_forecast_utils import (
+from onee.full_forecast_utils import (
     get_latest_year_status,
     extrapolate_features,
     configure_stf_for_year,

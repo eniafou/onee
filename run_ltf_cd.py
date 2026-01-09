@@ -5,7 +5,7 @@
 from onee.short_term_forecast_strategies import (
     create_monthly_matrix,
 )
-from long_term_forecast_strategies import run_long_horizon_forecast
+from onee.long_term_forecast_strategies import run_long_horizon_forecast
 from onee.config.ltf_config import LongTermForecastConfig
 from onee.data.loader import DataLoader
 from onee.data.names import Aliases
@@ -16,7 +16,7 @@ import pandas as pd
 import warnings
 import sys
 import joblib
-from full_forecast_utils import (
+from onee.full_forecast_utils import (
     rename_to_stf_cd_results,
 )
 warnings.filterwarnings("ignore")

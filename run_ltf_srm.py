@@ -5,7 +5,7 @@
 from onee.short_term_forecast_strategies import (
     create_monthly_matrix,
 )
-from long_term_forecast_strategies import run_long_horizon_forecast, create_summary_dataframe
+from onee.long_term_forecast_strategies import run_long_horizon_forecast, create_summary_dataframe
 from onee.utils import fill_2020_with_avg, clean_name
 from onee.config.ltf_config import LongTermForecastConfig
 from onee.data.loader import DataLoader

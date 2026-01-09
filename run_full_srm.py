@@ -7,7 +7,7 @@ from run_stf_srm import run_stf_srm_forecast, prepare_prediction_output as prepa
 from run_ltf_srm import run_ltf_srm_forecast, prepare_prediction_output as prepare_prediction_output_ltf
 from onee.data.names import Aliases
 # ...existing imports...
-from full_forecast_utils import (
+from onee.full_forecast_utils import (
     get_latest_year_status,
     extrapolate_features,
     configure_stf_for_year,
