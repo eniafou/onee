@@ -306,23 +306,23 @@ if __name__ == "__main__":
     
     
     # If successful, save outputs to disk
-    # for TARGET_REGION, all_results in all_results_by_region.items():
-    #     output_dir = output_dirs[TARGET_REGION]
+    for TARGET_REGION, all_results in all_results_by_region.items():
+        output_dir = output_dirs[TARGET_REGION]
         
-    #     # Save pickle file
-    #     with open(
-    #         output_dir / f"{clean_name(TARGET_REGION)}_{config.data.target_variable}_{config.project.exp_name}.pkl",
-    #         "wb",
-    #     ) as f:
-    #         pickle.dump(all_results, f)
+        # Save pickle file
+        with open(
+            output_dir / f"{clean_name(TARGET_REGION)}_{config.data.target_variable}_{config.project.exp_name}.pkl",
+            "wb",
+        ) as f:
+            pickle.dump(all_results, f)
         
-    #     # Create and save Excel summary
-    #     df_summary = create_summary_dataframe(all_results)
-    #     out_xlsx = (
-    #         output_dir / f"summary_{clean_name(TARGET_REGION)}_{config.data.target_variable}_{config.project.exp_name}.xlsx"
-    #     )
-    #     df_summary.to_excel(out_xlsx, index=False)
-    #     print(f"\n📁 Saved horizon forecasts to {out_xlsx}")
+        # Create and save Excel summary
+        df_summary = create_summary_dataframe(all_results)
+        out_xlsx = (
+            output_dir / f"summary_{clean_name(TARGET_REGION)}_{config.data.target_variable}_{config.project.exp_name}.xlsx"
+        )
+        df_summary.to_excel(out_xlsx, index=False)
+        print(f"\n📁 Saved horizon forecasts to {out_xlsx}")
     
     # Exit with appropriate code
     sys.exit(0 if result['status'] == 'success' else 1)

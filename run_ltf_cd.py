@@ -5,7 +5,7 @@
 from onee.short_term_forecast_strategies import (
     create_monthly_matrix,
 )
-from onee.long_term_forecast_strategies import run_long_horizon_forecast
+from onee.long_term_forecast_strategies import run_long_horizon_forecast, create_summary_dataframe
 from onee.config.ltf_config import LongTermForecastConfig
 from onee.data.loader import DataLoader
 from onee.data.names import Aliases
@@ -14,6 +14,7 @@ from onee.utils import get_move_out_year
 import numpy as np
 import pandas as pd
 import warnings
+import pickle
 import sys
 import joblib
 from onee.full_forecast_utils import (
@@ -486,7 +487,6 @@ if __name__ == "__main__":
     
     # Run the forecast with config, data, and output_dir
     result = run_ltf_cd_forecast(config=config, df_contrats=df_contrats, df_features=df_features, output_dir=config.get_output_dir())
-    joblib.dump(result, 'result_ltf_cd.joblib')
     df_prediction = prepare_prediction_output(result['results'])
     
     # Process activity-level and region-level predictions separately
@@ -509,24 +509,25 @@ if __name__ == "__main__":
     
     final_df = rename_to_stf_cd_results(final_df)
     final_df.to_csv("ltf_cd_results.csv", index=False, encoding="utf-8-sig")
+    
     # If successful, save outputs to disk
-    # if result['status'] == 'success':
-    #     all_results = result['results']
+    if result['status'] == 'success':
+        all_results = result['results']
         
-    #     # Save pickle file
-    #     with open(
-    #         output_dir / f"{config.data.target_variable}_{config.project.exp_name}.pkl",
-    #         "wb",
-    #     ) as f:
-    #         pickle.dump(all_results, f)
+        # Save pickle file
+        with open(
+            output_dir / f"{config.data.target_variable}_{config.project.exp_name}.pkl",
+            "wb",
+        ) as f:
+            pickle.dump(all_results, f)
         
-    #     # Create and save Excel summary
-    #     df_summary = create_summary_dataframe(all_results)
-    #     out_xlsx = (
-    #         output_dir / f"summary_{config.data.target_variable}_{config.project.exp_name}.xlsx"
-    #     )
-    #     df_summary.to_excel(out_xlsx, index=False)
-    #     print(f"\n📁 Saved horizon forecasts to {out_xlsx}")
+        # Create and save Excel summary
+        df_summary = create_summary_dataframe(all_results)
+        out_xlsx = (
+            output_dir / f"summary_{config.data.target_variable}_{config.project.exp_name}.xlsx"
+        )
+        df_summary.to_excel(out_xlsx, index=False)
+        print(f"\n📁 Saved horizon forecasts to {out_xlsx}")
     
     # Exit with appropriate code
     sys.exit(0 if result['status'] == 'success' else 1)
